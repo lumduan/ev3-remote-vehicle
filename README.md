@@ -9,11 +9,20 @@ proprietary firmware.
 
 ## Status
 
-**Phase 1 of 5.** The repository exists; the vehicle does not. There is
-no control loop, no gamepad pairing, and no robot. See
-[ROADMAP.md](ROADMAP.md) for the phase order, what each phase has to
-prove on the physical brick, and — just as important — the list of
-things this project has **not** yet checked on hardware.
+**Phase 2 of 5.** The vehicle does not exist. There is no control loop,
+no gamepad pairing, and no robot.
+
+What does exist is `ev3ctl`, the diagnostic tool: it connects to the
+brick over SSH, shows every motor and sensor live at 5 Hz, and drives
+motors from the keyboard so you can find out what is plugged into which
+port before building anything.
+
+**`ev3ctl` has never been run against a real brick.** Its host-side
+behaviour has been exercised against a simulated one, which is a
+different claim and a much weaker one. See "Verified in simulation only"
+in [ROADMAP.md](ROADMAP.md) for exactly what that covered, and the
+Phase 2 acceptance test for what has to be done on hardware before any
+of it can be believed.
 
 Nothing in this repository claims to have been tested on a brick unless
 it appears in the Verified table in [ROADMAP.md](ROADMAP.md).
@@ -112,12 +121,78 @@ If SSH does not connect, check in this order: the cable is in the PC
 port and not the host port; the brick is booted far enough to show
 Brickman; `ping ev3dev.local` answers.
 
+## The ev3ctl command
+
+`ev3ctl` finds out what is plugged into which port. Nothing in this
+project assumes a port mapping; this is how the mapping gets established.
+
+```bash
+uv run ev3ctl scan     # one inventory of every port, printed once
+uv run ev3ctl live     # 5 Hz dashboard with interactive motor control
+uv run ev3ctl          # same as live
+```
+
+Both take `--host` (default `robot@ev3dev.local`), `--agent` to override
+the agent source, `--timeout`, and `--no-multiplex`.
+
+The dashboard's keys:
+
+| Key | What it does |
+| --- | --- |
+| `a` `b` `c` `d` | select an output port |
+| `1` `2` `3` `4` | select an input port |
+| left / right | change the selected motor's duty by 10 |
+| `space` | set the selected motor's duty to 0 |
+| `0` | stop every motor |
+| `r` | reset the selected motor, zeroing its position |
+| `s` | cycle the selected sensor's mode |
+| `q` | quit |
+
+Both output ports A to D and input ports 1 to 4 are always shown, whether
+or not anything is plugged in, so that an empty port is visibly empty
+rather than simply missing.
+
+### How it works, in one paragraph
+
+Two programs. `src/ev3ctl/` runs on the Mac and does all the drawing.
+`agent/ev3_agent.py` is copied to `/tmp/ev3_agent.py` on the brick and
+does all the hardware access, under the brick's own Python 3.5 with no
+third-party packages, because nothing can be installed there. They talk
+newline-delimited JSON over one SSH process and share nothing else.
+
+**A motor commanded through `run-direct` keeps turning until something
+stops it** — losing the link does not, and neither does killing the
+program. So the agent runs a watchdog: no command for one second with a
+motor commanded non-zero, and it stops every motor by itself. The Mac's
+200 ms polling is what keeps that watchdog quiet, and the watchdog is
+what makes it safe to pull the cable. See "Motors latch" in
+[CLAUDE.md](CLAUDE.md).
+
+### Debugging the brick side by hand
+
+The agent is a normal program and stays runnable without the Mac:
+
+```bash
+ssh robot@ev3dev.local
+python3 -u /tmp/ev3_agent.py
+{"id": 1, "cmd": "hello"}
+{"id": 2, "cmd": "scan"}
+```
+
+It prints its own usage to stderr when it detects a terminal. Note that
+a motor commanded this way is stopped again a second later by the
+watchdog, because a person thinking about what to type next is
+indistinguishable from a link that has died.
+
 ## Repository layout
 
 | Path | Runtime | What it is |
 | --- | --- | --- |
 | `src/ev3ctl/` | CPython 3.12, macOS | Host tooling. The `ev3ctl` command. May use `rich`. |
+| `src/ev3ctl/cli/` | CPython 3.12, macOS | One module per subcommand. |
+| `src/ev3ctl/link.py` | CPython 3.12, macOS | The SSH transport and the only module that knows the wire. |
 | `agent/` | CPython 3.5, ev3dev | Code that runs **on the brick**. Standard library only. Copied there, never imported by `src/`. |
+| `agent/ev3_agent.py` | CPython 3.5, ev3dev | All hardware access, and the watchdog. One file, no dependencies. |
 | `pyproject.toml` | — | `uv` project definition. Host dependencies only. |
 | `README.md` | — | This file. |
 | `CLAUDE.md` | — | Working rules for this repository. |

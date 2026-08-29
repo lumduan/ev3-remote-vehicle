@@ -45,6 +45,44 @@ The two sides share exactly one thing: a wire protocol. That is the only
 coupling, and it is the only thing that has to stay in sync. When you
 change one side of it, change the other in the same commit.
 
+## The protocol is the only coupling
+
+The two sides share one thing: newline-delimited JSON over the stdin and
+stdout of a single SSH process. Change one side of it and change the
+other in the same commit.
+
+```
+Mac   -> {"id": 7, "cmd": "motor_run", "address": "outA", "duty": 30}
+brick -> {"id": 7, "ok": true,  "result": {...}}
+brick -> {"id": 7, "ok": false, "kind": "no_device", "error": "..."}
+```
+
+Rules that hold in both directions:
+
+- **One response per command, carrying the id it was given.** Every path
+  through the agent's dispatch returns a response, including the ones
+  that failed. A command that produces no reply leaves the host waiting
+  on a link that, from where it sits, is merely slow.
+- **Strictly synchronous, never pipelined.** The host sends one command
+  and waits for that id.
+- **stdout is the protocol and nothing else.** Everything human-readable
+  from the brick goes to stderr, on its own pipe. A shell profile on the
+  brick that prints a banner would otherwise corrupt the stream, which is
+  why an unparseable line is reported rather than skipped.
+- **Neither end trusts the other.** Duty is clamped to -100..100 on the
+  host and clamped again on the brick. The agent in `/tmp` may be an
+  older copy; the process on the other end may not be this tool at all.
+- **The host owns rendering, the brick owns sysfs.** The agent returns
+  raw driver integers with their `decimals`, `units` and `count_per_rot`;
+  the host does the arithmetic. Scaling on the brick would spend a
+  300 MHz CPU on work the Mac is idle for.
+
+`poll` carries two things beyond the values that change: the list of
+device nodes, and each sensor's mode. The node list is what lets the host
+re-`scan` only when something is plugged or unplugged, instead of paying
+for a full inventory at 5 Hz. Both are cheap, and both exist to keep work
+off the brick.
+
 ## Motors latch
 
 **This is the rule that outranks every other rule in this repository.**
@@ -89,6 +127,17 @@ Three rules follow from it, and they are not optional:
    running, unplugging the cable must stop it within about a second.
    Anything else means the watchdog is broken, and nothing else in the
    project can be trusted until it is fixed.
+
+Two failures that look alike and are not:
+
+- **The link dies, the agent lives.** Pulling the USB cable kills ssh.
+  The agent keeps running on the brick, reaches EOF on stdin, and runs
+  its `finally`. The watchdog is the backstop if it does not. Motors
+  stop. This is the case the latch test exercises.
+- **The agent dies.** If the process on the brick is killed outright,
+  nothing on the brick is left to stop anything, and the motor runs until
+  the battery is pulled. There is no software answer to this from the
+  Mac. It is the reason the watchdog lives on the brick and not here.
 
 Restoring the operator's terminal comes *before* attempting a final stop
 over the link, because terminal restoration is local and instant while

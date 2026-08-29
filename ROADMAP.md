@@ -37,6 +37,29 @@ cannot say what it does not know will eventually build on a guess.
 Note what is **not** in that table: anything at all about the brick's
 software. Every such fact is below.
 
+### Verified in simulation only
+
+Exercised on the development machine on 2026-08-29, against a fake sysfs
+tree and the real agent running as a local process. These say the code
+does what it intends. **They say nothing about the brick, the drivers,
+or a motor**, and none of them substitutes for the Phase 2 acceptance
+test. They are listed separately from Verified for exactly that reason.
+
+| Behaviour | How it was exercised |
+| --- | --- |
+| The watchdog stops a latched motor 0.99 s after commands stop | Fake sysfs tree, motor commanded to duty 40, then no further commands. `command` became `stop` |
+| The watchdog does **not** fire while the host is polling | `ev3ctl live` driven through a pty, motor held at duty 30 for 2.5 s. `command` stayed `run-direct` |
+| EOF on the agent's stdin stops every motor | Agent's stdin closed with a motor at duty 40. `command` became `stop`, agent exited 0 |
+| `q` stops every motor and restores the terminal | pty session: `command` became `stop`, exit 0, terminal flags identical before and after |
+| Ctrl-C does the same, and exits 130 | pty session, `\x03` sent while a motor was at duty 40 |
+| A dead link is reported, not raised as a traceback | Agent process killed mid-session. Exit 2, diagnosis printed, terminal restored |
+| Port addresses are read, never inferred from node names | Fake tree where `motor0` is `outC` and `motor1` is `outA`. Both landed in the right rows |
+| Degrees are computed from the device's own `count_per_rot` | Fake motor with `count_per_rot` 720: 360 counts rendered as 180.0 deg, not 360 |
+| Sensor values are scaled by `decimals` | Fake ultrasonic sensor, raw 2537 with `decimals` 1, rendered 253.7 cm |
+| An implausible battery voltage is surfaced as a warning | 8.12 V accepted; the same reading a thousand times larger flagged as bad scaling |
+| Unplugging a device empties its row within one refresh | Motor node deleted from the fake tree mid-session; the node list changed, a rescan followed, row A read `empty` |
+| Missing sysfs is survivable | The whole agent run on macOS, where none of `/sys/class/*` exists. Every field returned null, nothing raised |
+
 ### Unverified, and how each one gets resolved
 
 | Claim | Why it is not verified | Resolved by |
@@ -134,41 +157,118 @@ claims to know things it has not checked is worse than no scaffold.
 
 ## Phase 2: Port and device diagnostic CLI
 
+**Status: implemented, unproven on hardware.** `ev3ctl` exists and runs.
+Its host-side behaviour has been exercised against a simulated brick;
+see "Verified in simulation only" above for exactly what that did and
+did not cover. **No part of it has touched a real motor.** Nothing here
+may be treated as working until the acceptance test below has been run
+on the brick.
+
 **Goal.** Find out what is actually plugged into which port, and prove a
-motor can be commanded and stopped — before any robot is built. No port
+motor can be commanded and stopped, before any robot is built. No port
 mapping in this project is a guess, and this phase is why.
 
-The tool must show an empty port as empty rather than omitting it, must
-survive a device being unplugged while it is running, and must show
-values in real units rather than raw driver integers.
+**Work.** Two components and one protocol.
 
-**Acceptance test.** On the physical brick, connected by USB only:
+`agent/ev3_agent.py` runs on the brick under Python 3.5 with the
+standard library only. It owns every sysfs read and every sysfs write,
+and it owns the watchdog. `src/ev3ctl/` runs on the Mac and owns all
+rendering. They talk newline-delimited JSON over the stdin and stdout of
+one SSH process, and share nothing else. `ev3ctl scan` prints one
+inventory and exits; `ev3ctl live` is the 5 Hz dashboard with
+interactive motor control.
 
-1. With nothing plugged into any port, the inventory shows four output
-   rows and four input rows, all empty, plus a battery voltage between
-   6.0 and 8.5 V.
-2. The header shows the brick's real kernel version and Python version.
-   **Record both in the Verified table above.**
-3. A Large Motor plugged into port A appears within one refresh, with
-   its driver name. Turning the shaft by hand changes position and
-   degrees, and speed becomes non-zero.
-4. Unplugging that motor while the tool is running returns row A to
-   empty within one refresh, and the tool does not crash.
-5. Commanding the selected motor to duty 30 spins it; commanded duty
-   reads 30 and actual duty tracks it; commanding 0 stops it.
-6. A Color Sensor in input port 1 shows its driver name and a scaled
-   value with a unit. Cycling its mode changes the value shape.
-7. **Latch test.** With a motor at duty 40, unplug the USB cable. The
-   motor must stop within about one second.
-8. Quitting returns the terminal to normal, echo works, and every motor
-   is stopped.
-9. Ctrl-C does the same.
+**Acceptance test.** On the physical brick, connected by USB only. Each
+item says what to observe and what to check when it does not happen.
+
+1. **Empty inventory.** With nothing plugged into any port, run
+   `uv run ev3ctl scan`.
+   **Observe:** four output rows A to D and four input rows 1 to 4, all
+   reading `empty`, and a battery voltage between 6.0 and 8.5 V.
+   **If not:** a battery line reading "outside the plausible 6.0-8.5 V
+   range" means `voltage_now` is not in microvolts on this driver, and
+   the scaling in `model.py` needs the real unit. A `lego-port` table
+   reading "absent or empty" means `/sys/class/lego-port` does not exist
+   on this release; the A-D and 1-4 rows come from a fixed grid and are
+   unaffected, but record it in Unverified above. If the whole command
+   fails, it prints the failing ssh command and a checklist; work down
+   the checklist rather than reading the Python.
+
+2. **Header facts.** Read the header of that same output.
+   **Observe:** the brick's real kernel version and Python version.
+   **Record both verbatim in the Verified table above.** This is the
+   step that resolves two of the four seeded Unverified rows.
+   **If not:** a blank kernel or python field means `hello` returned
+   null for it, which would mean `os.uname()` or `sys.version` failed on
+   the brick - unlikely, and worth investigating before trusting
+   anything else the tool says.
+
+3. **A motor appears.** Plug a Large Motor into port A and run
+   `uv run ev3ctl live`.
+   **Observe:** within one refresh (200 ms), row A shows driver
+   `lego-ev3-l-motor`. Turn the shaft by hand: Counts and Deg change,
+   and Speed becomes non-zero.
+   **If not:** if the row stays empty, the device node exists but its
+   `address` attribute did not read as `outA`; run
+   `ssh robot@ev3dev.local 'cat /sys/class/tacho-motor/*/address'` to see
+   what it actually says. If Deg stays at `-` while Counts moves,
+   `count_per_rot` was unreadable; the tool refuses to assume 360, so
+   record the real value in Unverified.
+
+4. **A motor disappears.** Unplug that motor while `live` is running.
+   **Observe:** row A returns to `empty` within one refresh, and the
+   tool does not crash.
+   **If not:** the rescan is driven by the node list carried in every
+   `poll`. If the row is stale, the node set is not changing when a
+   device is removed on this release, and the tool would have to compare
+   addresses instead.
+
+5. **A motor turns.** Press `a`, then the right arrow three times.
+   **Observe:** the motor spins. `Cmd` reads 30 and `Duty` tracks it.
+   Press `space`: the motor stops and `Cmd` reads 0.
+   **If not:** `Cmd` is `duty_cycle_sp` read back off the brick, not what
+   the tool intended, so `Cmd` staying at 0 means the write was refused.
+   The footer shows the refusal. Check that `run-direct` is in the
+   motor's `commands` list, which `ev3ctl scan` prints.
+
+6. **A sensor reads.** Plug a Color Sensor into input port 1.
+   **Observe:** row 1 shows its driver name and a value scaled by
+   `decimals` with its unit, not a raw integer. Press `s`: the mode
+   changes and the Values column changes shape.
+   **If not:** a value shown with no unit means `units` was unreadable.
+   A value that looks a factor of ten wrong means `decimals` was
+   unreadable, in which case the tool prints the raw integer rather than
+   guessing the scale.
+
+7. **Latch test.** Set a motor to duty 40, then **pull the USB cable out
+   while it is running.**
+   **Observe:** the motor stops within about one second.
+   **If not: stop. The watchdog is broken and nothing else in this tool
+   may be trusted.** Two independent mechanisms should stop it, and both
+   live on the brick because the Mac is gone: the agent reaching EOF on
+   stdin and running `stop_all` in its `finally`, and the watchdog thread
+   firing after 1000 ms with no command. Reproduce it by hand with
+   `ssh robot@ev3dev.local` then `python3 -u /tmp/ev3_agent.py`, type
+   `{"id":1,"cmd":"motor_run","address":"outA","duty":40}`, and wait: the
+   watchdog should stop it a second later and say so on stderr.
+
+8. **Clean quit.** Press `q`.
+   **Observe:** the terminal returns to normal, typing echoes, and every
+   motor is stopped.
+   **If not:** if the shell is left without echo, `stty sane` recovers
+   it. The terminal is restored before anything is sent to the brick,
+   precisely so that a dead link cannot cost you your shell.
+
+9. **Interrupt.** Press Ctrl-C during `live`.
+   **Observe:** the same outcome as item 8, and exit status 130.
+   **If not:** Ctrl-C works because the terminal is put in cbreak rather
+   than raw mode, leaving `ISIG` on. If Ctrl-C does nothing, that is the
+   thing to check.
 
 **Pass:** 7, 8 and 9. **Item 7 is the most important test in this
-project.** If a motor does not stop when the cable is pulled, the
-watchdog is broken, and nothing else in this repository may be trusted
-until it is fixed. Items 1 to 6 are what makes the tool useful; item 7
-is what makes it safe to use.
+project.** Items 1 to 6 are what makes the tool useful; item 7 is what
+makes it safe to use. A tool that cannot be trusted to stop a motor is
+worse than no tool, because it will be trusted.
 
 ## Phase 3: Gamepad pairing and evdev event-code mapping
 
