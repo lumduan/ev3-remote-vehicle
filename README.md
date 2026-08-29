@@ -288,12 +288,13 @@ why: DHCP hands out addresses over a link that already exists, and PAN
 is what would have created that link. There is no link for it to run
 over.
 
-There is one other way to carry IP over Bluetooth, and the pieces are
-present: macOS exposes `/dev/tty.EV3` for the paired brick over the
-serial port profile, and `pppd` is installed. PPP over that would give
-IP at both ends without any DHCP at all, since PPP negotiates addresses
-itself. Untested, slower than USB, and it spends the radio the gamepad
-needs — see ROADMAP.md before reaching for it.
+PPP over a Bluetooth serial link was tried next and does not work
+either: the brick has no `pppd` installed and advertises no Serial Port
+profile, so there is nothing to run PPP over and no way to add it
+without installing software on a brick that has no internet. The
+`/dev/tty.EV3` serial port on the Mac belongs to a different Bluetooth
+address than the one this brick's adapter reports. Details in
+[ROADMAP.md](ROADMAP.md).
 
 If you want a second transport to prove `drive` is transport
 independent, a supported USB WiFi dongle in the brick's host port is the

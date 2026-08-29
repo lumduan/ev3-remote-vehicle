@@ -132,20 +132,36 @@ code in this repository, only an `ssh` invocation and a `--host` string -
 but "true by construction" is exactly the kind of claim this document
 exists to distrust.
 
-**PAN is not the only way to carry IP over Bluetooth, though.** The
-Mac's controller does advertise `SerialPort`, and macOS has already
-created `/dev/tty.EV3` and `/dev/cu.EV3` for the paired brick
-(`00:16:53:43:46:af`, the same address the USB gadget MAC is derived
-from). `/usr/sbin/pppd` is still present. PPP over that RFCOMM link
-would give IP at both ends, and PPP carries its own address negotiation,
-so no DHCP server is needed on either side - the addresses are stated on
-the command line.
+**PPP over a Bluetooth serial link was tried next, and does not work
+either.** Tested 2026-08-29. It looked promising from the Mac alone -
+the controller advertises `SerialPort`, `/usr/sbin/pppd` is installed,
+and macOS had already created `/dev/tty.EV3` and `/dev/cu.EV3`. Every
+one of those is on the wrong side of the link.
 
-That is untested. It is also a poor trade for this project: RFCOMM over
-Bluetooth 2.1 EDR plus PPP framing will be slower than USB's 96 ms,
-probably by several hundred milliseconds, against a watchdog that fires
-at 1000 ms - and it spends the radio Phase 3 needs. Recorded because it
-is possible, not because it is advisable.
+| Blocker | Evidence |
+| --- | --- |
+| **`pppd` is not installed on the brick.** The kernel has `CONFIG_PPP=m`, so the capability exists, but the daemon does not | `/usr/sbin/pppd: No such file or directory` on the brick |
+| **The brick advertises no Serial Port profile.** There is nothing for PPP to run over | `sdptool browse local` returns zero service records |
+| **Root is required and unavailable.** `rfcomm` binding and `pppd` both need it | `sudo -n true` fails; the account needs a password |
+
+Installing `pppd` would fix the first and is not an option: the brick
+has no route to the internet, and this project does not install anything
+on it.
+
+**And `/dev/tty.EV3` is not this brick.** That was an inference from the
+USB gadget MAC `12:16:53:43:46:af` appearing to derive from
+`00:16:53:43:46:af`, and it was wrong. `hciconfig` on the brick reports
+its adapter as **`00:17:EC:ED:46:29`**, which is the device macOS shows
+as `ev3dev`, and macOS has created no serial port for it. The `EV3`
+pairing at `00:16:53:43:46:af` is something else - most plausibly this
+brick under the stock LEGO firmware, which does advertise SPP where
+ev3dev does not.
+
+**DHCP would not have helped at any point**, and it is worth saying
+plainly because it is the natural thing to reach for. DHCP hands out
+addresses over a link that already exists; every failure above is the
+absence of the link itself. PPP would not have needed DHCP either - it
+negotiates addresses itself.
 
 The honest options, none of them urgent:
 
@@ -153,9 +169,8 @@ The honest options, none of them urgent:
   answer, gives the brick a real IP, and proves the same thing item 8
   was written to prove. A hardware purchase.
 - **A Linux host**, which does still have PAN, if one is to hand.
-- **PPP over the existing RFCOMM serial link**, as above. Possible with
-  what is already installed, and slower than the thing it would be
-  proving something about.
+- **PPP over a Bluetooth serial link.** Ruled out above: the brick has
+  neither the daemon nor the profile, and cannot be given either.
 - **Accept USB only** and rewrite item 8 to say so. The gamepad is
   getting the radio in Phase 3 regardless, and this project's own rule
   has always been that Bluetooth is not a development link.
