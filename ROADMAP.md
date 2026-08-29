@@ -203,6 +203,37 @@ the cache without re-establishing anything; clearing it would mean
 restarting the Mac's Bluetooth daemon or re-pairing, neither of which
 was worth doing to the operator's other devices.
 
+**Why it never completed, established over about seven attempts.**
+macOS opens the RFCOMM channel **exactly once per `bluetoothd`
+lifetime**. The first connection after the daemon starts reaches the
+brick; every one after that has `open()` and `write()` succeed locally
+against a cached session while the brick's listener sees nothing at all.
+Two for two on the working case - the first attempt ever, and the first
+after a `sudo pkill bluetoothd` - and five for five on the failing one.
+
+Both times the channel did open, the brick side had a different fault,
+and they were found in the wrong order:
+
+1. First working channel: `/tmp/ev3_agent.py` was missing, because the
+   brick had rebooted and `/tmp` does not survive that. The agent exited
+   before replying.
+2. Second working channel: the agent was present, but `rfcomm watch`
+   starts its command at the instant the device node is created, before
+   the channel has settled, so the agent read EOF and exited silently -
+   an empty `agent_bt.log` next to a live listener.
+
+The second was fixed by decoupling: `rfcomm` maintains the device, and a
+separate supervisor waits for it and then runs the agent. That fix has
+never yet met a fresh channel, so **no protocol round trip has completed
+over Bluetooth, and no round-trip time exists to compare with USB's
+96 ms.**
+
+**This is what rules it out as a transport, independently of whether the
+next attempt would answer.** A link that can be established once per
+Bluetooth-daemon lifetime would need the operator to restart their Mac's
+Bluetooth - dropping every other device they own - before each run. That
+is not a development link, and it is not a driving link either.
+
 **What it means for this project.** The transport independence that
 acceptance item 8 exists to prove is real, and stronger than the item
 assumed: the agent is a byte-stream program, so the question is not
