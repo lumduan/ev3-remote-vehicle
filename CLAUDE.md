@@ -155,6 +155,14 @@ would resolve it, and handle its absence in code. Specifically:
   bound the devices in, and it changes between runs. Enumerate the class
   directory and read each device's `address` attribute to learn its
   port. This is the most common mistake made with these drivers.
+- **Never assume the shape of a value either, only that you have to read
+  it.** This brick reports its addresses as `ev3-ports:outA`, not
+  `outA`. The project assumed the bare form, because that is what the
+  documentation uses, and the result was a tool that connected, read
+  both motors correctly, and drew four empty rows. Every test written
+  before the brick was plugged in passed, because the fake sysfs tree
+  was built from the same assumption. Reading the attribute is not
+  enough on its own; the format it comes back in is a fact too.
 - **Never assume an attribute exists.** Attribute sets differ between
   ev3dev releases and between drivers. Read defensively, catch per
   attribute, and report the value as unknown rather than aborting.

@@ -21,29 +21,57 @@ the date it was read. Everything else is Unverified, and each Unverified
 row names the phase that resolves it.
 
 This section is the most useful part of the document. A project that
-cannot say what it does not know will eventually build on a guess.
+cannot say what it does not know will eventually build on a guess. It
+did, twice, on 2026-08-29; both are recorded below.
 
 ### Verified
 
+Read off the hardware on **2026-08-29**, over the USB link, by SSH.
+
 | Fact | Where it came from |
 | --- | --- |
-| Development machine is macOS 26.5.2, build 25F84, on `arm64` | `sw_vers` and `uname -m`, 2026-08-29 |
-| Host Python is 3.14.2 | `python3 --version`, 2026-08-29 |
-| Host `uv` is 0.11.7 | `uv --version`, 2026-08-29 |
-| Host git is 2.50.1 (Apple Git-155) | `git --version`, 2026-08-29 |
-| Host ssh is OpenSSH_10.2p1 | `ssh -V`, 2026-08-29 |
-| The brick boots ev3dev from microSD and reaches the Brickman menu | Reported by the operator, 2026-08-29 |
+| Kernel is `4.14.117-ev3dev-2.3.5-ev3`, `#1 PREEMPT Sat Mar 7 12:54:39 CST 2020`, `armv5tejl` | `uname -a` on the brick |
+| Python 3 on the brick is **3.5.3**, at `/usr/bin/python3` | `python3 -VV` on the brick. The 3.5-only rule for `agent/` was the correct assumption |
+| `/etc/ev3dev-release` reads `ev3-micropython-v2.0.0-sd-card-image` | `cat` on the brick. This card is the EV3 MicroPython image, not the plain ev3dev-stretch image. It is still Debian 9.12 with the ev3dev kernel and the ev3dev sysfs drivers, which is all this project uses |
+| `/etc/debian_version` is `9.12` | `cat` on the brick |
+| CPU is `ARM926EJ-S rev 5 (v5l)`, hardware `LEGO MINDSTORMS EV3` | `/proc/cpuinfo` |
+| Usable RAM is **56 MB**, with 95 MB of swap | `free -m` |
+| **macOS on Apple Silicon does enumerate the gadget**, as interface `en7` | `ifconfig` diff before and after plugging in. It is bridged into `bridge100`, which is macOS Internet Sharing |
+| `ev3dev.local` resolves to **two** addresses: an IPv6 one that works, and `192.168.137.3` which does not | `dscacheutil -q host -a name ev3dev.local`. SSH connects over IPv6 |
+| **Plain `ping ev3dev.local` fails while the link is perfectly healthy** | 100% packet loss to the IPv4 address, while `ping6 ev3dev.local` answers in 1.3 ms and ssh works. Use `ping6`, never `ping`, to test this link |
+| Key authentication works on the stock image | `ssh -o BatchMode=yes robot@ev3dev.local true` connects with no prompt after `ssh-copy-id` |
+| `/sys/class/lego-port/` **exists and lists all eight ports** with nothing attached, as `port0` to `port7` | `ls` on the brick. Empty input ports report status `no-sensor`, empty output ports `no-motor` |
+| **Port addresses are `ev3-ports:outA`, not `outA`** | `cat /sys/class/tacho-motor/*/address`. See "the address prefix" below; this cost a wrong assumption |
+| The battery node is `lego-ev3-battery`, and it has both `voltage_now` and `current_now` | `ls /sys/class/power_supply/*/` |
+| **`voltage_now` is in microvolts**: 8053800 reads as 8.05 V, inside the plausible 6.0-8.5 V band | `cat`, cross-checked against the sanity range the tool applies |
+| `current_now` 156000 reads as 156 mA | same |
+| Two **Large Motors** (`lego-ev3-l-motor`) are attached, on **outA and outD** | `ev3ctl scan` and `cat /sys/class/tacho-motor/*/address` |
+| `count_per_rot` is **360** on the EV3 Large Motor on this driver | `cat /sys/class/tacho-motor/*/count_per_rot`. It is read, not assumed; the code still refuses to default to 360 |
+| `run-direct` **is** in every motor's `commands` list | `commands` reads `run-forever run-to-abs-pos run-to-rel-pos run-timed run-direct stop reset` |
+| No sensors are attached: `/sys/class/lego-sensor/` is empty | `ls` on the brick |
+| `ev3ctl scan` runs against the real brick and prints the real kernel, Python, release and battery | Run on 2026-08-29 |
 
-Note what is **not** in that table: anything at all about the brick's
-software. Every such fact is below.
+**The address prefix.** This project assumed a motor's `address` would
+read `outA`, because that is the form the specification and most
+documentation use. The driver reports `ev3-ports:outA`. The result was a
+tool that connected perfectly, read both motors, and drew four empty
+rows, because nothing matched the port grid. Both sides now compare on
+the bare name after the last colon and accept either form. It is exactly
+the failure the "never invent a hardware fact" rule exists to prevent,
+and it survived every test written before the brick was plugged in,
+because the fake sysfs tree had been built from the same assumption.
 
 ### Verified in simulation only
 
 Exercised on the development machine on 2026-08-29, against a fake sysfs
 tree and the real agent running as a local process. These say the code
-does what it intends. **They say nothing about the brick, the drivers,
-or a motor**, and none of them substitutes for the Phase 2 acceptance
-test. They are listed separately from Verified for exactly that reason.
+does what it intends. **They say nothing about a real motor turning**,
+and none of them substitutes for the Phase 2 acceptance test. They are
+listed separately from Verified for exactly that reason.
+
+The fake tree was corrected to use the real `ev3-ports:` address form
+once the hardware disproved the old one, and deliberately leaves one
+device on the bare form so both are covered.
 
 | Behaviour | How it was exercised |
 | --- | --- |
@@ -54,6 +82,7 @@ test. They are listed separately from Verified for exactly that reason.
 | Ctrl-C does the same, and exits 130 | pty session, `\x03` sent while a motor was at duty 40 |
 | A dead link is reported, not raised as a traceback | Agent process killed mid-session. Exit 2, diagnosis printed, terminal restored |
 | Port addresses are read, never inferred from node names | Fake tree where `motor0` is `outC` and `motor1` is `outA`. Both landed in the right rows |
+| Both address forms are accepted | Fake tree mixes `ev3-ports:in1` and a bare `in4` |
 | Degrees are computed from the device's own `count_per_rot` | Fake motor with `count_per_rot` 720: 360 counts rendered as 180.0 deg, not 360 |
 | Sensor values are scaled by `decimals` | Fake ultrasonic sensor, raw 2537 with `decimals` 1, rendered 253.7 cm |
 | An implausible battery voltage is surfaced as a warning | 8.12 V accepted; the same reading a thousand times larger flagged as bad scaling |
@@ -64,20 +93,12 @@ test. They are listed separately from Verified for exactly that reason.
 
 | Claim | Why it is not verified | Resolved by |
 | --- | --- | --- |
-| The exact ev3dev kernel version on this brick | Never read. `uname -r` has not been run on this brick and its output has not been recorded anywhere in this repository | **Phase 2.** `ev3ctl scan` prints it in the header. Record the exact string in the Verified table above |
-| The Python 3 version on this brick | Never read. ev3dev-stretch is Debian 9, whose system Python 3 is *expected* to be 3.5, but expected is not read. Everything under `agent/` is written to 3.5 because that is the safe assumption, not because it has been confirmed | **Phase 2.** `ev3ctl scan` prints `sys.version` in the header. Record it |
-| Whether macOS on Apple Silicon enumerates the ev3dev USB gadget network interface at all, and under what name | Never tried on this machine. macOS supports CDC-ECM natively and does not support RNDIS; which of those the brick presents, and whether macOS binds it without help, is unknown here. This is the single point of failure for the entire development link | **Phase 0 acceptance test**, re-run and recorded. If it fails, the project is blocked at Phase 0 and the contingency is a supported USB WiFi dongle in the brick's host port — a hardware purchase, a separate decision, and still not Bluetooth |
-| Whether `hid-sony` binds the DualShock 4 on this kernel | No gamepad has been paired. The DualShock 4 is a Bluetooth Classic HID device and ev3dev ships `hid-sony`, but whether the module is present in this kernel build, and whether it binds this controller revision, has not been checked | **Phase 3.** Pair the controller, then look for the device under `/dev/input/` and check the driver bound to it |
-| Whether `/etc/ev3dev-release` exists on this image | Not read. The agent protocol returns null for it rather than failing, precisely because its presence is a guess | **Phase 2.** `hello` returns its contents or null |
-| Whether `/sys/class/lego-port/` exists on this release and lists ports with **nothing** attached | Not read. The diagnostic CLI is specified on the assumption that an empty port is still visible as a port. If it is not, empty rows have to come from a fixed A–D and 1–4 grid instead | **Phase 2**, on first run against the real brick with nothing plugged in |
-| The `power_supply` node name for the battery, and whether `current_now` exists on it | Not read. Code globs `/sys/class/power_supply/*` and takes the first entry rather than hardcoding a name, because the name is unknown | **Phase 2.** `ev3ctl scan` shows the node name and the battery reading |
-| That battery `voltage_now` is in microvolts | Not read. It is the Linux power-supply class convention, but this is a driver on an unusual platform. A reading far outside 6.0–8.5 V means the scaling assumption is wrong, so the tool surfaces that as a warning rather than printing a nonsense number | **Phase 2.** A plausible voltage confirms it; an implausible one disproves it, and either outcome is information |
-| `count_per_rot` for the EV3 Large Motor and the EV3 Medium Motor on this driver | Not read. 360 is a plausible value and is exactly the kind of plausible value that is wrong. Degrees are computed as `position / count_per_rot * 360` with the value read from the device, never assumed | **Phase 2**, with a motor attached |
-| Whether `run-direct` appears in every motor's `commands` list on this driver | Not read. The whole interactive motor control depends on it | **Phase 2**, with a motor attached. `scan` returns each motor's `commands` list |
-| Whether `ev3dev.local` resolves from this Mac, or whether an IP address is needed | Not tried. Depends on Avahi running on the brick and on mDNS working across the USB interface | **Phase 0 acceptance test** |
-| Whether the stock ev3dev image accepts key authentication after `ssh-copy-id` | Not tried. The default account is `robot` with password `maker`; whether `~/.ssh` on the image is set up to accept an installed key is unconfirmed | **Phase 0 acceptance test** |
-| The Brickman menu path that brings the wired USB connection up | Not read off the brick. Expected to be `Wireless and Networks` → `All Network Connections` → the wired entry → `Connect`, but the wording differs between ev3dev releases | **Phase 0 acceptance test.** Record what the brick actually says |
-| Which EV3 motors and sensors are actually on hand, and what is plugged where | Nothing is plugged in and no robot is built. No port mapping is written down anywhere in this repository, deliberately | **Phase 2.** That is the entire purpose of the diagnostic CLI |
+| Whether `hid-sony` binds the DualShock 4 on this kernel | No gamepad has been paired. `hid-sony` is not confirmed present in this kernel build either | **Phase 3.** Pair the controller, then look for the device under `/dev/input/` and check the driver bound to it |
+| That a motor actually turns when commanded, and that `Cmd` and `Duty` track | `ev3ctl scan` has run against the brick; `ev3ctl live` has not, and no motor has been commanded over the real link. The port grid bug was found and fixed but the fix has not been seen working on hardware | **Phase 2**, acceptance items 3 to 6 |
+| **That a motor stops within a second when the USB cable is pulled** | The watchdog and the EOF path both work in simulation. Neither has been tested against a motor that is actually turning. **This is the one that matters** | **Phase 2**, acceptance item 7 |
+| Sensor behaviour: `decimals`, `units`, `modes`, and whether mode cycling works | No sensor is attached to this brick | **Phase 2**, acceptance item 6 |
+| Why the brick dropped off the USB bus mid-session on 2026-08-29 | The `en7` interface vanished and the interface list returned byte-identical to the pre-plug baseline, while work was in progress. Cause unknown: cable, power, or an idle shutdown | **Phase 0**, next time the brick is connected. If it recurs, it matters a great deal, because a link that dies on its own is the latch test happening at random |
+| Whether the brick has working internet through macOS Internet Sharing | The gadget is bridged into `bridge100`, so it plausibly does, but the check did not complete before the brick disconnected | Idle curiosity only. **Nothing in this project may install anything on the brick**, so the answer changes nothing |
 
 ---
 
@@ -85,13 +106,18 @@ test. They are listed separately from Verified for exactly that reason.
 
 ## Phase 0: USB development link verified
 
-**Status: complete, with its evidence gap named.** The brick boots
-ev3dev and the operator reaches the Brickman menu. What this repository
-has *not* yet recorded is the interface name macOS gives the gadget,
-the brick's kernel version, its Python version, and whether
-`ev3dev.local` resolves. Those four sit in the Unverified table above
-and are resolved by re-running the acceptance test below and writing
-down what it prints.
+**Status: complete, with evidence, on 2026-08-29.** macOS on Apple
+Silicon enumerates the gadget as `en7` and bridges it into `bridge100`.
+`ev3dev.local` resolves over IPv6, key authentication works, and the
+brick's kernel, Python version and release string are in the Verified
+table above.
+
+One thing about this link is still open, and it is not small: **the
+brick dropped off the USB bus by itself, mid-session, with no cable
+touched.** `en7` vanished and the interface list went back to exactly
+what it was before the brick was plugged in. Cause unknown. It is in the
+Unverified table, and it matters because a link that dies on its own is
+the latch test firing at a moment nobody chose.
 
 **Goal.** A development link that is a cable, not a radio. Everything
 later in this project assumes the host can reach the brick without
@@ -106,8 +132,11 @@ switched off on the brick if it is switchable:
 
 1. `ifconfig -a` on the Mac lists a network interface that was not there
    before the cable was plugged in. **Record its name.**
-2. `ping -c 3 ev3dev.local` answers. If it does not, find the brick's
-   address from Brickman and note that mDNS is not usable.
+2. `ping6 -c 3 ev3dev.local` answers. **Use `ping6`, not `ping`.**
+   Verified on 2026-08-29: mDNS hands back both a working IPv6 address
+   and an unreachable IPv4 one, so plain `ping` reports 100% loss for a
+   brick that SSH reaches without trouble. `ping` failing proves
+   nothing here.
 3. `ssh robot@ev3dev.local` connects with password `maker`.
 4. `ssh-copy-id robot@ev3dev.local` succeeds, and a following
    `ssh -o BatchMode=yes robot@ev3dev.local true` connects with no
@@ -157,12 +186,19 @@ claims to know things it has not checked is worse than no scaffold.
 
 ## Phase 2: Port and device diagnostic CLI
 
-**Status: implemented, unproven on hardware.** `ev3ctl` exists and runs.
-Its host-side behaviour has been exercised against a simulated brick;
-see "Verified in simulation only" above for exactly what that did and
-did not cover. **No part of it has touched a real motor.** Nothing here
-may be treated as working until the acceptance test below has been run
-on the brick.
+**Status: implemented. Acceptance items 1 and 2 done on hardware;
+3 to 9 outstanding.** `ev3ctl scan` has run against the real brick and
+printed its real kernel, Python version, release and battery; those
+readings are in the Verified table above.
+
+**No motor has been commanded over the real link, and the latch test has
+not been run.** Everything from item 3 down is still simulation only.
+Running against the brick found three bugs that no amount of simulation
+would have: an SSH control socket path too long for `sockaddr_un`, a
+troubleshooting checklist that told the operator to use `ping` when
+`ping` cannot work here, and a port grid built on the wrong address
+format. All three are fixed; none of the fixes has been watched moving a
+motor.
 
 **Goal.** Find out what is actually plugged into which port, and prove a
 motor can be commanded and stopped, before any robot is built. No port

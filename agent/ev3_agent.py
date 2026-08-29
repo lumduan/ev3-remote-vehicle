@@ -117,6 +117,22 @@ def list_nodes(class_dir):
         return []
 
 
+def port_key(address):
+    # type: (str) -> str
+    """The bare port name out of a driver address.
+
+    This brick reports "ev3-ports:outA", not "outA". Both forms are in
+    circulation - the bare one in most documentation and in this
+    project's own port grid, the prefixed one in the driver - so
+    comparisons are made on the bare form and neither is assumed to be
+    the one that will turn up. Read on 2026-08-29 from
+    /sys/class/tacho-motor/motor0/address on kernel 4.14.117-ev3dev.
+    """
+    if address is None:
+        return None
+    return address.rsplit(":", 1)[-1]
+
+
 def find_by_address(class_dir, address):
     # type: (str, str) -> str or None
     """Return the node directory whose address attribute matches.
@@ -126,10 +142,17 @@ def find_by_address(class_dir, address):
     the devices in, and it changes when something is replugged. The only
     way to learn a port is to read the address attribute of each device,
     every time, which is what this does.
+
+    Either address form is accepted, so a host that says "outA" and a
+    driver that says "ev3-ports:outA" still find each other.
     """
+    target = port_key(address)
     for node in list_nodes(class_dir):
         node_dir = os.path.join(class_dir, node)
-        if read_attr(node_dir, "address") == address:
+        found = read_attr(node_dir, "address")
+        if found is None:
+            continue
+        if found == address or port_key(found) == target:
             return node_dir
     return None
 

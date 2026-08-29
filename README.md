@@ -17,12 +17,13 @@ brick over SSH, shows every motor and sensor live at 5 Hz, and drives
 motors from the keyboard so you can find out what is plugged into which
 port before building anything.
 
-**`ev3ctl` has never been run against a real brick.** Its host-side
-behaviour has been exercised against a simulated one, which is a
-different claim and a much weaker one. See "Verified in simulation only"
-in [ROADMAP.md](ROADMAP.md) for exactly what that covered, and the
-Phase 2 acceptance test for what has to be done on hardware before any
-of it can be believed.
+`ev3ctl scan` **has** run against the real brick, on 2026-08-29, and
+read back its kernel, Python version, release string, battery and both
+attached motors. **No motor has been commanded over the real link, and
+the cable-pull latch test has not been run**, so everything from
+acceptance item 3 down is still simulation only. See "Verified" and
+"Verified in simulation only" in [ROADMAP.md](ROADMAP.md); the
+difference between those two tables is the point of them.
 
 Nothing in this repository claims to have been tested on a brick unless
 it appears in the Verified table in [ROADMAP.md](ROADMAP.md).
@@ -101,9 +102,14 @@ On the brick, bring the wired connection up from Brickman, then from
 the Mac:
 
 ```bash
-ping ev3dev.local
+ping6 ev3dev.local              # ping6, not ping - see below
 ssh robot@ev3dev.local          # default password: maker
 ```
+
+**Use `ping6`.** On this setup mDNS answers `ev3dev.local` with both a
+working IPv6 address and an IPv4 address that nothing answers on, so
+plain `ping ev3dev.local` reports 100% packet loss for a brick that SSH
+reaches in a millisecond. `ping` failing here proves nothing at all.
 
 Do this once, so that no later command ever has to stop and ask for a
 password:

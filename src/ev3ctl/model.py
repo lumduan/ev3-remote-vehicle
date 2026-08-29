@@ -30,6 +30,23 @@ BATTERY_MAX_V = 8.5
 DASH = "-"
 
 
+def port_key(address):
+    """The bare port name out of a driver address.
+
+    The brick reports "ev3-ports:outA"; the grid above, and most
+    documentation, use "outA". Everything on this side is indexed on the
+    bare form so the two line up, while each device keeps its own raw
+    address for sending commands back.
+
+    Read off the hardware on 2026-08-29; see ROADMAP.md. Before that,
+    this project assumed the bare form and the motors table showed four
+    empty rows with two motors plugged in.
+    """
+    if not address:
+        return None
+    return address.rsplit(":", 1)[-1]
+
+
 def scaled(raw, decimals):
     """A sensor's real reading: value / 10 ** decimals."""
     if raw is None:
@@ -126,8 +143,8 @@ class Snapshot(object):
 
     def __init__(self, payload=None):
         payload = payload or {}
-        self.motors = payload.get("motors") or {}
-        self.sensors = payload.get("sensors") or {}
+        self.motors = _rekey(payload.get("motors"))
+        self.sensors = _rekey(payload.get("sensors"))
         self.battery = payload.get("battery") or {}
         self.nodes = payload.get("nodes") or {}
 
@@ -141,10 +158,20 @@ class Snapshot(object):
 def _by_address(items):
     indexed = {}
     for item in items:
-        address = item.get("address")
-        if address:
-            indexed[address] = item
+        key = port_key(item.get("address"))
+        if key:
+            indexed[key] = item
     return indexed
+
+
+def _rekey(mapping):
+    """Re-key a poll payload onto the bare port names the grid uses."""
+    rekeyed = {}
+    for address, value in (mapping or {}).items():
+        key = port_key(address)
+        if key:
+            rekeyed[key] = value
+    return rekeyed
 
 
 def nodes_changed(before, after):

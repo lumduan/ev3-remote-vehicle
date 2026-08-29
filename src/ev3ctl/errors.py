@@ -6,6 +6,12 @@ prints a traceback. A traceback names the line that gave up. The
 operator needs to know whether the cable is in the PC port.
 """
 
+# Ordered so that the cheapest and most likely fix comes first. The
+# reachability test is deliberately `ssh ... true` and not `ping`:
+# on this setup mDNS returns both an IPv6 address that works and an
+# IPv4 address that does not, so plain `ping ev3dev.local` reports
+# 100% loss while ssh connects perfectly well. A checklist that sends
+# the operator to debug a working link is worse than no checklist.
 DEFAULT_CHECKLIST = (
     "the mini-USB cable is in the brick's PC port, not the USB-A host "
     "port, and in the Mac",
@@ -13,9 +19,13 @@ DEFAULT_CHECKLIST = (
     "menu",
     "the wired connection is up in Brickman, under "
     "Wireless and Networks / All Network Connections",
-    "`ping ev3dev.local` answers",
-    "`ssh robot@ev3dev.local` connects (password: maker), and "
-    "`ssh-copy-id robot@ev3dev.local` has been run once",
+    "`ssh -o BatchMode=yes robot@ev3dev.local true` connects without "
+    "a prompt; if it asks for a password, run "
+    "`ssh-copy-id robot@ev3dev.local` once (password: maker)",
+    "`ping6 ev3dev.local` answers. Do not trust plain `ping`: mDNS may "
+    "hand back an unreachable IPv4 address for a brick that is "
+    "perfectly reachable over IPv6",
+    "if ssh reports `ControlPath too long`, pass --no-multiplex",
 )
 
 

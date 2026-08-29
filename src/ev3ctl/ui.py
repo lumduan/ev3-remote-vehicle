@@ -230,9 +230,12 @@ def ports_table(inventory):
         title="lego-port", title_justify="left", header_style="head",
         expand=True, padding=(0, 1),
     )
-    table.add_column("Address", width=8)
-    table.add_column("Driver")
-    table.add_column("Mode", width=14)
+    # Both the bare port and the driver's own address string, because
+    # they are not the same thing on this hardware and finding that out
+    # cost an afternoon: the driver says "ev3-ports:outA".
+    table.add_column("Port", width=6)
+    table.add_column("Address", min_width=15)
+    table.add_column("Driver", min_width=16)
     table.add_column("Status")
     rows = sorted(inventory.ports.items())
     if not rows:
@@ -240,11 +243,11 @@ def ports_table(inventory):
                       "[empty]/sys/class/lego-port is absent or empty"
                       "[/empty]", "", "")
         return table
-    for address, port in rows:
+    for key, port in rows:
         table.add_row(
-            text(address),
+            text(key),
+            text(port.get("address")),
             text(port.get("driver_name")),
-            text(port.get("mode")),
             text(port.get("status")),
         )
     return table

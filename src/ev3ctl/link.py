@@ -34,6 +34,9 @@ DEFAULT_TIMEOUT_S = 8.0
 CONNECT_TIMEOUT_S = 10
 READ_CHUNK = 65536
 
+# sockaddr_un.sun_path is 104 bytes on macOS. Leave a little room.
+CONTROL_PATH_LIMIT = 100
+
 
 def find_agent_source(override=None):
     """Locate agent/ev3_agent.py.
@@ -107,13 +110,31 @@ class Link(object):
         return options
 
     def _start_multiplexing(self):
+        """Set up a shared SSH connection, or quietly do without one.
+
+        A control socket is a unix domain socket, so the whole path must
+        fit in sockaddr_un.sun_path - 104 bytes on macOS. Two things
+        conspire against that: the default temp directory here is
+        /var/folders/<two long random components>/T/, and ssh's %C token
+        expands to a 40-character hash. Together they overflow, and ssh
+        fails the connection outright rather than falling back.
+
+        So the socket goes in /tmp under a short fixed name, and if even
+        that would not fit, multiplexing is dropped. It is a latency
+        optimisation; it is not worth failing to reach the brick for.
+        """
         if not self._multiplex:
             return
-        # A control socket is a unix socket, so the path has to stay
-        # short. %C is a hash of user/host/port, which keeps it short
-        # whatever the host is called.
-        self._control_dir = tempfile.mkdtemp(prefix="ev3ctl-")
-        self._control_path = os.path.join(self._control_dir, "%C")
+        try:
+            control_dir = tempfile.mkdtemp(prefix="ev3ctl-", dir="/tmp")
+        except OSError:
+            return
+        control_path = os.path.join(control_dir, "s")
+        if len(control_path) >= CONTROL_PATH_LIMIT:
+            shutil.rmtree(control_dir, ignore_errors=True)
+            return
+        self._control_dir = control_dir
+        self._control_path = control_path
 
     def _copy_agent(self):
         """Send the agent to the brick over the SSH channel itself.
