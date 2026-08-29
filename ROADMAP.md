@@ -39,6 +39,9 @@ Read off the hardware on **2026-08-29**, over the USB link, by SSH.
 | **macOS on Apple Silicon does enumerate the gadget**, as interface `en7` | `ifconfig` diff before and after plugging in. It is bridged into `bridge100`, which is macOS Internet Sharing |
 | `ev3dev.local` resolves to **two** addresses: an IPv6 one that works, and `192.168.137.3` which does not | `dscacheutil -q host -a name ev3dev.local`. SSH connects over IPv6 |
 | **Plain `ping ev3dev.local` fails while the link is perfectly healthy** | 100% packet loss to the IPv4 address, while `ping6 ev3dev.local` answers in 1.3 ms and ssh works. Use `ping6`, never `ping`, to test this link |
+| The brick's own interface is `usb0`, holding `192.168.137.3/24` with a default route via `192.168.137.1` | `ip route` on the brick |
+| **The brick's IPv4 config is for a network that is not there.** The Mac's sharing bridge is `192.168.2.1/24`, so nothing answers `192.168.137.1` | Comparing `ip route` on the brick with `ifconfig bridge100` on the Mac. This is why the advertised IPv4 address is unreachable and why IPv6 is the only working path |
+| The brick has **no internet access** | `ping 8.8.8.8` from the brick: 100% loss, 2 errors. Consistent with the routing mismatch above |
 | Key authentication works on the stock image | `ssh -o BatchMode=yes robot@ev3dev.local true` connects with no prompt after `ssh-copy-id` |
 | `/sys/class/lego-port/` **exists and lists all eight ports** with nothing attached, as `port0` to `port7` | `ls` on the brick. Empty input ports report status `no-sensor`, empty output ports `no-motor` |
 | **Port addresses are `ev3-ports:outA`, not `outA`** | `cat /sys/class/tacho-motor/*/address`. See "the address prefix" below; this cost a wrong assumption |
@@ -98,7 +101,7 @@ device on the bare form so both are covered.
 | **That a motor stops within a second when the USB cable is pulled** | The watchdog and the EOF path both work in simulation. Neither has been tested against a motor that is actually turning. **This is the one that matters** | **Phase 2**, acceptance item 7 |
 | Sensor behaviour: `decimals`, `units`, `modes`, and whether mode cycling works | No sensor is attached to this brick | **Phase 2**, acceptance item 6 |
 | Why the brick dropped off the USB bus mid-session on 2026-08-29 | The `en7` interface vanished and the interface list returned byte-identical to the pre-plug baseline, while work was in progress. Cause unknown: cable, power, or an idle shutdown | **Phase 0**, next time the brick is connected. If it recurs, it matters a great deal, because a link that dies on its own is the latch test happening at random |
-| Whether the brick has working internet through macOS Internet Sharing | The gadget is bridged into `bridge100`, so it plausibly does, but the check did not complete before the brick disconnected | Idle curiosity only. **Nothing in this project may install anything on the brick**, so the answer changes nothing |
+| Why the brick is configured for `192.168.137.0/24` when the Mac shares `192.168.2.0/24` | Observed, not explained. `192.168.137.0/24` is the range Windows Internet Connection Sharing uses by default, so a stale profile from another host is the likely story, but that has not been checked in the brick's connman config | Nobody, for now. **It costs this project nothing**: SSH works over IPv6, and nothing here needs the brick to have internet or a working IPv4 address. Worth knowing before anyone spends an afternoon on the IPv4 address |
 
 ---
 

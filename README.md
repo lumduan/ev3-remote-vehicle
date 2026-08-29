@@ -111,6 +111,14 @@ working IPv6 address and an IPv4 address that nothing answers on, so
 plain `ping ev3dev.local` reports 100% packet loss for a brick that SSH
 reaches in a millisecond. `ping` failing here proves nothing at all.
 
+The reason, for anyone tempted to fix it: the brick holds
+`192.168.137.3` on its `usb0` with a default route via `192.168.137.1`,
+while the Mac's sharing bridge is `192.168.2.1/24`. Those are different
+networks, so the brick's IPv4 address is unreachable and the brick has
+no route to the internet. **None of that matters here.** SSH works over
+IPv6, and nothing in this project needs the brick to reach the internet
+— it must never have anything installed on it anyway.
+
 Do this once, so that no later command ever has to stop and ask for a
 password:
 
