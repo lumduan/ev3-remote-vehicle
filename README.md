@@ -283,6 +283,18 @@ No amount of configuration on the brick fixes that; there is nothing on
 this side to connect to. Details and the options are under "Bluetooth
 PAN on macOS" in [ROADMAP.md](ROADMAP.md).
 
+A DHCP server on the Mac does not help, and it is worth being clear
+why: DHCP hands out addresses over a link that already exists, and PAN
+is what would have created that link. There is no link for it to run
+over.
+
+There is one other way to carry IP over Bluetooth, and the pieces are
+present: macOS exposes `/dev/tty.EV3` for the paired brick over the
+serial port profile, and `pppd` is installed. PPP over that would give
+IP at both ends without any DHCP at all, since PPP negotiates addresses
+itself. Untested, slower than USB, and it spends the radio the gamepad
+needs — see ROADMAP.md before reaching for it.
+
 If you want a second transport to prove `drive` is transport
 independent, a supported USB WiFi dongle in the brick's host port is the
 usual ev3dev answer and gives the brick a real address:

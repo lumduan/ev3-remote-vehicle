@@ -132,12 +132,30 @@ code in this repository, only an `ssh` invocation and a `--host` string -
 but "true by construction" is exactly the kind of claim this document
 exists to distrust.
 
+**PAN is not the only way to carry IP over Bluetooth, though.** The
+Mac's controller does advertise `SerialPort`, and macOS has already
+created `/dev/tty.EV3` and `/dev/cu.EV3` for the paired brick
+(`00:16:53:43:46:af`, the same address the USB gadget MAC is derived
+from). `/usr/sbin/pppd` is still present. PPP over that RFCOMM link
+would give IP at both ends, and PPP carries its own address negotiation,
+so no DHCP server is needed on either side - the addresses are stated on
+the command line.
+
+That is untested. It is also a poor trade for this project: RFCOMM over
+Bluetooth 2.1 EDR plus PPP framing will be slower than USB's 96 ms,
+probably by several hundred milliseconds, against a watchdog that fires
+at 1000 ms - and it spends the radio Phase 3 needs. Recorded because it
+is possible, not because it is advisable.
+
 The honest options, none of them urgent:
 
 - **A USB WiFi dongle in the brick's host port.** The standard ev3dev
   answer, gives the brick a real IP, and proves the same thing item 8
   was written to prove. A hardware purchase.
 - **A Linux host**, which does still have PAN, if one is to hand.
+- **PPP over the existing RFCOMM serial link**, as above. Possible with
+  what is already installed, and slower than the thing it would be
+  proving something about.
 - **Accept USB only** and rewrite item 8 to say so. The gamepad is
   getting the radio in Phase 3 regardless, and this project's own rule
   has always been that Bluetooth is not a development link.
