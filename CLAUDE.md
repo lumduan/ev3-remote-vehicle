@@ -77,6 +77,18 @@ Rules that hold in both directions:
   the host does the arithmetic. Scaling on the brick would spend a
   300 MHz CPU on work the Mac is idle for.
 
+`drive` applies both sides of a tank drive in one message, because two
+`motor_run` commands per loop iteration would double the round trips and
+the round trip is the whole budget a control loop has. If either side
+fails, **both are stopped** before the error is raised: a vehicle with
+one wheel driving and one refusing is worse than one that has stopped.
+
+Its reply carries only `duty_cycle` and `speed` per side. That is not
+minimalism for its own sake — a sysfs attribute read costs about 9 ms on
+this brick, and a reply carrying six values per side measured 144 ms
+against 96 ms for two. Anything not in a control loop should ask `poll`
+for the rest.
+
 `poll` carries two things beyond the values that change: the list of
 device nodes, and each sensor's mode. The node list is what lets the host
 re-`scan` only when something is plugged or unplugged, instead of paying

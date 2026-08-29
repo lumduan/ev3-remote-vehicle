@@ -57,7 +57,15 @@ Read off the hardware on **2026-08-29**, over the USB link, by SSH.
 | **The EOF path stops a real motor.** Same setup, link then torn down: drive was cut about **0.12 s** after the teardown | The agent's `finally` running `stop_all`, faster than the watchdog because EOF arrives at once |
 | A Large Motor at duty 40 turns at roughly **319 deg/s** | Same traces |
 | `stop_action` is **`coast`**, and `stop_actions` offers `coast brake hold` | `cat` on the brick |
-| **"Stopped" means drive removed, not motion ended.** After the drive was cut the motor freewheeled for a further **0.66 s** before reaching zero speed | The same traces. See the note under Phase 5 |
+| **"Stopped" means drive removed, not motion ended.** With `stop_action` at its default `coast`, after the drive was cut the motor freewheeled for a further **0.66 s** before reaching zero speed | The same traces. See the note under Phase 5 |
+| **`brake` largely removes that freewheel.** With `stop_action` set to `brake`, speed fell from 229 to 32 deg/s in **0.11 s** after the cut, against roughly 0.48 s for the same fall on `coast` | Measured 2026-08-29 by the same method, after `ev3ctl drive` set the attribute |
+| `stop_action` persists on the brick until reboot or a motor `reset` | A second `drive` run reports it as already `brake` rather than changing it |
+| **A sysfs attribute read costs about 9 ms on this brick** | Derived from the round-trip table below. It is why the `drive` readback returns two values and not six |
+| Round trip over USB, by command: `hello` **19 ms** (no sysfs at all), `motor_run` 38 ms, `drive` **96 ms**, `poll` 131 ms | Measured 2026-08-29 over 15 calls each on an idle brick. The SSH link is only 19% of a drive; the rest is the brick reading and writing sysfs |
+| Under contention - a second process polling sysfs at 10 Hz - `drive` rose to **168 ms typical, 372 ms maximum** | Read off the `ev3ctl drive` footer during the hardware run. Still comfortably inside the watchdog's 1000 ms, and the trip counter stayed at 0 |
+| **Trimming the `drive` readback from six values per side to two cut the round trip from 144 ms to 96 ms** | Measured before and after. It is the single largest thing this project has done for control latency, and it was done by returning less |
+| `ev3ctl drive` works end to end on hardware: `stop_action` reported `coast -> brake`, `w` drove both motors at duty 40 and 325/335 deg/s, `a` counter-rotated at -40/+40, `w`+`a` pivoted at 0/40, `space` and `q` both stopped everything, exit 0, terminal restored | Driven through a pty against the real brick, 2026-08-29. Only a human pressing real keys is untested |
+| A Large Motor at duty 40 turns at roughly **325 to 340 deg/s** | Read back from both motors during `drive` |
 | `ev3ctl scan` runs against the real brick and prints the real kernel, Python, release and battery | Run on 2026-08-29 |
 
 **The address prefix.** This project assumed a motor's `address` would
@@ -102,6 +110,8 @@ device on the bare form so both are covered.
 
 | Claim | Why it is not verified | Resolved by |
 | --- | --- | --- |
+| **Round-trip time over Bluetooth PAN**, typical and maximum | Never measured; PAN has not been brought up. Over USB the same `drive` command measures 96 ms typical, 107 ms maximum, of which only 19 ms is the link. PAN is slower and more variable, and if it approaches the watchdog's 1000 ms the motors will be cut under a held key | **Phase 2a, acceptance item 8.** Record both figures there |
+| The Brickman menu path for bringing up Bluetooth PAN | Written down from expectation, not read off this brick. The brick's Bluetooth has never been used | **Phase 2a, acceptance item 8.** Correct README when the real path is seen |
 | Whether `hid-sony` binds the DualShock 4 on this kernel | No gamepad has been paired. `hid-sony` is not confirmed present in this kernel build either | **Phase 3.** Pair the controller, then look for the device under `/dev/input/` and check the driver bound to it |
 | That the dashboard's keys drive a motor, and that a device unplugged mid-session empties its row | A motor has now been commanded over the real link and turned, and `ev3ctl scan` shows both motors in the right rows. What has not been exercised on hardware is `ev3ctl live` itself: its key handling, its rescan-on-replug, and its teardown | **Phase 2**, acceptance items 4, 5 and 8 |
 | That a motor stops when the **USB cable is physically pulled** | Both mechanisms that would stop it are now proven on a real turning motor: the watchdog at 0.94 s with the link up and the host silent, and the EOF path at 0.12 s when the link is torn down. What has not been done is the physical act, which is the one case where the link neither closes cleanly nor stays up | **Phase 2**, acceptance item 7. It needs a hand on the cable and cannot be done remotely |
@@ -317,6 +327,135 @@ item says what to observe and what to check when it does not happen.
 project.** Items 1 to 6 are what makes the tool useful; item 7 is what
 makes it safe to use. A tool that cannot be trusted to stop a motor is
 worse than no tool, because it will be trusted.
+
+## Phase 2a: Keyboard tank drive
+
+**Status: implemented, and items 1 to 7 verified on the real brick by
+driving the program through a pty.** What remains is a human pressing
+real keys, and everything involving Bluetooth PAN or a chassis: items 8,
+9 and 10.
+
+**Goal.** Something that drives, before there is a gamepad or a
+vehicle. `ev3ctl drive` tank-steers two motors from WASD, and works
+unchanged over USB and over Bluetooth PAN because both are the same SSH
+invocation with a different `--host`.
+
+This is the short way to a moving robot, in the same spirit as the
+sibling project's skid-steer phase. Nothing in it is wasted: the mixing,
+the slew limiting and the safety shape are what Phase 4 reuses when the
+gamepad replaces the keyboard.
+
+**Work.** A `drive` agent command applying both sides in one message; a
+`set_stop_action` agent command; `src/ev3ctl/mixer.py` holding the
+arithmetic as pure functions; `src/ev3ctl/cli/drive.py` holding the
+loop. The agent's watchdog, its `finally` and its EOF handling are
+untouched.
+
+### Two decisions worth reading before the tests
+
+**`stop_action` is now set to `brake` at startup, and that is the point
+of this phase.** The driver default is `coast`. Measured on
+2026-08-29: with `coast`, after the drive is cut the motor freewheels
+and is still turning at 91 deg/s a third of a second later, reaching
+rest at 0.66 s. With `brake` it is under 32 deg/s within 0.11 s. On a
+bench that difference is invisible. On a vehicle it is the difference
+between stopping and rolling on after the link has died.
+
+`stop_action` persists on the brick until it is rebooted or the motor is
+`reset`. So the first run after a boot reports `coast -> brake`, and
+every run after that reports it as already `brake`. Both are correct.
+
+**Teardown restores the terminal before it talks to the brick**, which
+is the opposite order to the one this phase was specified with. The
+reason: restoring the terminal takes microseconds, so doing it first
+delays the motor stop by nothing measurable, while doing it last would
+leave the operator's shell in cbreak for as long as `stop_all` and `bye`
+take to time out on a link that is already dead — up to two seconds. The
+brick's watchdog stops the motors at 0.94 s either way, which is what
+makes the ordering a usability question rather than a safety one.
+
+**Acceptance test.** Motors on the bench, not on a vehicle, for items 1
+to 7. Each says what to observe and what to check when it does not
+happen.
+
+1. **It starts.** `uv run ev3ctl drive` over USB.
+   **Observe:** both motors named in the Drive table, and a `stop`
+   line in the header reading `stop_action coast -> brake`.
+   **If not:** "already brake" means the brick has not been rebooted
+   since a previous run, which is correct. "stop_action unchanged" in
+   red means the write was refused; check `stop_actions` on the motor
+   contains `brake`.
+
+2. **Hold `w`.** Both motors ramp up over roughly a third of a second,
+   not instantly, then hold a steady duty. Release.
+   **Observe:** `Cmd` climbs 6, 12, 18 … to `--speed`, and both sides
+   are equal. On release both drop to 0 within about 150 ms.
+   **If not:** an instant jump to full means the slew limit is not being
+   applied. A stutter while holding means `--initial-hold-ms` is below
+   the operating system's auto-repeat delay; raise it.
+
+3. **Tap `w` once and let go.** The motors run about 600 ms and stop.
+   **Observe:** exactly that. **This is correct behaviour, not a
+   fault** — a terminal sends no key-release event, so a key is held
+   until it times out. `--initial-hold-ms` is that timeout.
+
+4. **Hold `a` alone.** The two motors counter-rotate, spinning in place.
+   **Observe:** `Cmd` equal and opposite, for example -40 and +40.
+   **If not:** if both turn the same way, one motor is mounted mirrored;
+   use `--invert-left` or `--invert-right`.
+
+5. **Hold `w` and `a` together.** One side stops and the other drives:
+   the vehicle pivots about the stopped wheel.
+   **Observe:** `Cmd` reading 0 and 40, not two similar numbers.
+   **This differs from what this phase was originally specified to do**,
+   which described both wheels turning at different speeds. The mixing
+   the phase specifies — `left = throttle + turn`, normalised by the
+   larger magnitude — cannot produce that at full deflection: full
+   forward plus full left is `0` and `2`, which normalises to `0` and
+   `1`. The formula was kept and this criterion corrected, rather than
+   shipping a test that must fail. Scaling the turn axis below 1.0 is
+   what would produce a gentle arc, if that is ever wanted.
+
+6. **Hold `w`, then press `space` while still holding it.**
+   **Observe:** both sides drop to 0 at once, faster than the slew limit
+   alone would allow, without waiting for `w` to time out.
+   **If not:** check `space` is reaching the program at all; the display
+   shows the held key set.
+
+7. **Hold `w`, then press `q`.** Then repeat with Ctrl-C.
+   **Observe:** motors stop, terminal echo works, exit status 0 for `q`
+   and 130 for Ctrl-C.
+   **If not:** if the shell is left without echo, `stty sane` recovers
+   it; the terminal is restored before anything is sent to the brick,
+   precisely so a dead link cannot cost you your shell.
+
+8. **Bluetooth PAN.** Bring PAN up on the brick, unplug USB entirely,
+   and run `ev3ctl drive --host robot@<pan-ip>`.
+   **Observe:** everything above behaves the same, and the footer shows
+   a round-trip time. **Record the typical and maximum here.** Over USB
+   the same command measures **96 ms** typical on an otherwise idle
+   brick, rising to **168 ms typical and 372 ms maximum** while another
+   process was also reading sysfs. Quote the second pair when comparing:
+   a driving robot is never the only thing running.
+   **If not:** if the round trip approaches 1000 ms the brick's watchdog
+   will cut the motors under a held key, and the footer's watchdog trip
+   counter will start climbing. That is the number that decides whether
+   PAN is usable for driving at all.
+
+9. **Walk away.** Over PAN, hold `w` and walk away from the brick until
+   the link drops.
+   **Observe:** the motors stop, and stop rather than freewheel.
+   **If not:** if they coast to a halt, `stop_action` did not take;
+   check item 1.
+
+10. **On the floor.** Attach both motors to any rolling chassis, however
+    crude, and run with `--speed 25`.
+    **Observe:** forward, back, spin in place, and a prompt stop when
+    the keys are released.
+    **If not:** a vehicle that turns the wrong way needs `--invert-*`,
+    not a code change.
+
+**Pass:** 7, 9 and 10. Item 9 is the one this phase exists for.
 
 ## Phase 3: Gamepad pairing and evdev event-code mapping
 

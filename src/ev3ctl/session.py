@@ -90,6 +90,15 @@ class Session(object):
     def stop_all(self):
         return self.link.request("stop_all")
 
+    def set_stop_action(self, address, value):
+        """Choose what stop means for one motor: coast, brake or hold.
+
+        Blocking on purpose. It runs once at startup, before the loop,
+        and the answer is worth printing before anything moves.
+        """
+        return self.link.request(
+            "set_stop_action", address=address, value=value)
+
     # -- the same commands, without waiting ---------------------------
     #
     # The live loop uses these. A keypress that blocked until the brick
@@ -119,6 +128,18 @@ class Session(object):
 
     def send_stop_all(self):
         return self.link.send("stop_all")
+
+    def send_drive(self, left_address, left_duty, right_address, right_duty):
+        """Both sides of a tank drive in one message.
+
+        Two motor_run commands per loop iteration would double the round
+        trips, and over Bluetooth PAN the round trip is the budget the
+        whole control loop has to live inside.
+        """
+        return self.link.send(
+            "drive",
+            left_address=left_address, left_duty=clamp_duty(left_duty),
+            right_address=right_address, right_duty=clamp_duty(right_duty))
 
     def apply_scan(self, payload):
         self.inventory = Inventory(payload)

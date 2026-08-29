@@ -81,6 +81,62 @@ def build_parser():
         description="Live dashboard at 5 Hz with interactive motor "
                     "control. This is what runs when no command is given.",
     )
+    _add_drive(subparsers, common)
+    return parser
+
+
+def _add_drive(subparsers, common):
+    from . import drive as drive_command
+
+    parser = subparsers.add_parser(
+        "drive", parents=[common],
+        help="tank-steer two motors from the WASD keys",
+        description=(
+            "Hold w a s d to drive two motors as a tank. Works unchanged "
+            "over USB and over Bluetooth PAN; only --host differs. "
+            "Terminals send no key-release event, so a key counts as held "
+            "until it times out - see --initial-hold-ms."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--left", metavar="PORT",
+        help="output port for the left motor "
+             "(default: first motor found by a scan)",
+    )
+    parser.add_argument(
+        "--right", metavar="PORT",
+        help="output port for the right motor "
+             "(default: second motor found by a scan)",
+    )
+    parser.add_argument(
+        "--invert-left", action="store_true",
+        help="negate the left duty, for a motor mounted mirrored",
+    )
+    parser.add_argument(
+        "--invert-right", action="store_true",
+        help="negate the right duty, for a motor mounted mirrored",
+    )
+    parser.add_argument(
+        "--speed", type=int, default=drive_command.SPEED_SCALE,
+        metavar="PERCENT",
+        help="top duty as a percentage, applied to both sides last. "
+             "The one number to lower for a beginner (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--initial-hold-ms", type=int,
+        default=drive_command.INITIAL_HOLD_MS, metavar="MS",
+        help="how long a key counts as held after its first byte. Covers "
+             "the OS auto-repeat delay; shorter makes a held key stutter "
+             "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--repeat-hold-ms", type=int,
+        default=drive_command.REPEAT_HOLD_MS, metavar="MS",
+        help="how long a key counts as held after each repeat byte. Also "
+             "the worst-case delay before a release is noticed "
+             "(default: %(default)s)",
+    )
     return parser
 
 
@@ -91,10 +147,16 @@ def main(argv=None):
 
     # Imported here rather than at module scope so that --help and
     # --version stay instant and do not pay for rich's import.
+    from . import drive as drive_command
     from . import live as live_command
     from . import scan as scan_command
 
-    runner = scan_command.run if command == "scan" else live_command.run
+    runners = {
+        "scan": scan_command.run,
+        "live": live_command.run,
+        "drive": drive_command.run,
+    }
+    runner = runners[command]
 
     try:
         return runner(args)

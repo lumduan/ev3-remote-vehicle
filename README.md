@@ -209,12 +209,93 @@ a motor commanded this way is stopped again a second later by the
 watchdog, because a person thinking about what to type next is
 indistinguishable from a link that has died.
 
+## Driving it
+
+`ev3ctl drive` tank-steers two motors from the keyboard. It is the
+shortest path to something that moves, and it needs no gamepad and no
+finished vehicle.
+
+```bash
+uv run ev3ctl drive                       # first two motors found
+uv run ev3ctl drive --left outA --right outD
+uv run ev3ctl drive --speed 25            # gentler, for a beginner
+uv run ev3ctl drive --invert-right        # a motor mounted mirrored
+```
+
+| Key | Action |
+| --- | --- |
+| `w` `s` | forward, backward |
+| `a` `d` | turn left, turn right |
+| `space` | stop both, immediately |
+| `q` | quit |
+
+Opposing keys cancel. `a` or `d` alone counter-rotates the motors and
+spins the vehicle in place. `w` and `a` together pivot about the stopped
+wheel rather than curving — see Phase 2a in [ROADMAP.md](ROADMAP.md) for
+why that falls out of the mixing.
+
+### Two things that surprise people
+
+**A tapped key runs the motors for about 600 ms.** Terminals send key
+*presses* and never key *releases*: there is no event that says you let
+go. So a key counts as held until it times out, refreshed by the
+operating system's own auto-repeat. `--initial-hold-ms` is that timeout
+and `--repeat-hold-ms` is the shorter one used once auto-repeat is
+running, which is also the worst-case delay before a release is noticed.
+Lowering `--initial-hold-ms` below the OS auto-repeat delay makes a held
+key stutter.
+
+**`drive` sets `stop_action` to `brake` on both motors at startup**, and
+says so in the header. The driver default is `coast`, which leaves a
+motor freewheeling for about two thirds of a second after the drive is
+cut. That is invisible on a bench and is the difference between stopping
+and rolling away on something with wheels.
+
+## The two transports
+
+The same command over either link. Only `--host` changes, because both
+are the same SSH invocation — there is no transport layer in this
+project and deliberately is not one.
+
+```bash
+uv run ev3ctl drive --host robot@ev3dev.local     # USB, the default
+uv run ev3ctl drive --host robot@10.0.0.5         # Bluetooth PAN
+```
+
+What differs is latency. Over USB a `drive` round trip measures about
+96 ms, of which only 19 ms is the link itself; the rest is the brick
+reading and writing sysfs. Bluetooth PAN is slower and more variable, so
+the control loop never queues: one command is in flight at a time and
+newer state replaces older state rather than joining a queue behind it.
+The footer shows the current round trip and a rolling maximum, and that
+maximum is the number that says whether PAN is usable for driving.
+
+### Bringing up Bluetooth PAN
+
+**Not yet verified on this brick.** These steps are written from
+expectation and are listed as unverified in [ROADMAP.md](ROADMAP.md)
+until someone has followed them on the hardware and corrected them.
+
+1. On the brick, in Brickman: `Wireless and Networks` → `Bluetooth`.
+   Switch Bluetooth on and make the brick visible.
+2. Pair the Mac with the brick, confirming the passkey on both.
+3. On the brick, connect the paired Mac's *network* service, not just
+   the pairing — Brickman lists it under the paired device.
+4. On the Mac, find the address the brick took, and use it:
+   `uv run ev3ctl drive --host robot@<that address>`.
+
+Remember the constraint this project is built around: **the brick has
+one Bluetooth radio, and the gamepad is going to want it.** PAN is
+useful for testing that `drive` is transport-independent. It is not the
+development link, and it cannot coexist with the gamepad.
+
 ## Repository layout
 
 | Path | Runtime | What it is |
 | --- | --- | --- |
 | `src/ev3ctl/` | CPython 3.12, macOS | Host tooling. The `ev3ctl` command. May use `rich`. |
 | `src/ev3ctl/cli/` | CPython 3.12, macOS | One module per subcommand. |
+| `src/ev3ctl/mixer.py` | CPython 3.12, macOS | Held keys to two motor duties. Pure functions, no I/O. |
 | `src/ev3ctl/link.py` | CPython 3.12, macOS | The SSH transport and the only module that knows the wire. |
 | `agent/` | CPython 3.5, ev3dev | Code that runs **on the brick**. Standard library only. Copied there, never imported by `src/`. |
 | `agent/ev3_agent.py` | CPython 3.5, ev3dev | All hardware access, and the watchdog. One file, no dependencies. |

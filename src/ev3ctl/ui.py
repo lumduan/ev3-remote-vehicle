@@ -251,3 +251,129 @@ def ports_table(inventory):
             text(port.get("status")),
         )
     return table
+
+
+# ---------------------------------------------------------------------
+# drive
+# ---------------------------------------------------------------------
+
+DRIVE_KEYS = ("w", "a", "s", "d")
+
+DRIVE_HELP = (
+    "[head]w a s d[/head] drive   "
+    "[head]space[/head] stop now   "
+    "[head]q[/head] quit"
+)
+
+
+def _held_keys(drive):
+    """The key set, drawn so a held key is unmistakable at a glance."""
+    parts = []
+    for key in DRIVE_KEYS:
+        if key in drive.held:
+            parts.append("[sel] " + key.upper() + " [/sel]")
+        else:
+            parts.append("[dim] " + key + " [/dim]")
+    return "  ".join(parts)
+
+
+def _millis(seconds):
+    if seconds is None:
+        return DASH
+    return "{0:.0f} ms".format(seconds * 1000.0)
+
+
+def drive_header(drive):
+    session = drive.session
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim", justify="right")
+    grid.add_column()
+    grid.add_row("host", text(session.hostname) + "  [dim]via[/dim] "
+                 + text(session.host))
+    grid.add_row("kernel", text(session.kernel))
+    for address, change in sorted(drive.stop_action.items()):
+        previous, current = change
+        if current is None:
+            grid.add_row("stop", "[fail]" + address
+                         + ": stop_action unchanged[/fail]")
+        elif previous == current:
+            grid.add_row("stop", address + ": stop_action already ["
+                         + "ok]" + text(current) + "[/ok]")
+        else:
+            grid.add_row("stop", address + ": stop_action [dim]"
+                         + text(previous) + "[/dim] -> [ok]"
+                         + text(current) + "[/ok]")
+    return Panel(grid, title="ev3ctl drive", title_align="left",
+                 padding=(0, 1))
+
+
+def drive_motors_table(drive):
+    table = Table(
+        title="Drive", title_justify="left", header_style="head",
+        expand=True, padding=(0, 1),
+    )
+    table.add_column("Side", width=6)
+    table.add_column("Port", min_width=10)
+    table.add_column("Cmd", justify="right", width=6)
+    table.add_column("Duty", justify="right", width=6)
+    table.add_column("Speed", justify="right", width=8)
+
+    # No state column. Every extra attribute in the drive readback costs
+    # about 9 ms of round trip on this brick, and state is not one of
+    # the values this display is required to show. `ev3ctl live` has it.
+    sides = (
+        ("left", drive.left, drive.duty_left, drive.invert_left),
+        ("right", drive.right, drive.duty_right, drive.invert_right),
+    )
+    for name, address, commanded, inverted in sides:
+        live = (drive.readback or {}).get(name) or {}
+        table.add_row(
+            name,
+            text(address) + (" [warn]inv[/warn]" if inverted else ""),
+            number(commanded),
+            number(live.get("duty_cycle")),
+            number(live.get("speed")),
+        )
+    return table
+
+
+def drive_footer(drive):
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column()
+    grid.add_row(Text.from_markup(
+        "[dim]keys[/dim]  " + _held_keys(drive)
+        + "    [dim]throttle[/dim] {0:+.2f}   [dim]turn[/dim] {1:+.2f}".format(
+            drive.throttle, drive.turn)))
+
+    rtt = _millis(drive.rtt)
+    rtt_max = _millis(drive.rtt_max())
+    trips = drive.watchdog_trips
+    grid.add_row(Text.from_markup(
+        "[dim]round trip[/dim] {0}   [dim]max/10s[/dim] {1}   "
+        "[dim]watchdog trips[/dim] {2}".format(
+            rtt, rtt_max,
+            "[warn]" + str(trips) + "[/warn]" if trips else "0")))
+
+    grid.add_row(Text.from_markup(
+        "[dim]speed[/dim] {0}%   [dim]hold[/dim] {1:.0f}/{2:.0f} ms"
+        "   [dim]slew[/dim] {3}%/loop".format(
+            drive.speed, drive.initial_hold * 1000,
+            drive.repeat_hold * 1000, drive.slew_limit)))
+
+    grid.add_row(Text.from_markup(DRIVE_HELP))
+    if drive.last_error:
+        grid.add_row(Text.from_markup(
+            "[fail]" + _one_line(drive.last_error) + "[/fail]"))
+    else:
+        grid.add_row(Text(""))
+    return Panel(grid, padding=(0, 1))
+
+
+def drive_dashboard(drive):
+    layout = Layout()
+    layout.split_column(
+        Layout(drive_header(drive), name="header", size=7),
+        Layout(drive_motors_table(drive), name="motors", size=6),
+        Layout(drive_footer(drive), name="footer", size=8),
+    )
+    return layout

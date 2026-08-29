@@ -48,9 +48,14 @@ WATCHDOG_TICK_S = 0.1
 MAX_SENSOR_VALUES = 32
 
 COMMANDS = (
-    "hello", "scan", "poll", "motor_run", "motor_stop", "motor_reset",
-    "sensor_mode", "stop_all", "bye",
+    "hello", "scan", "poll", "motor_run", "drive", "motor_stop",
+    "motor_reset", "set_stop_action", "sensor_mode", "stop_all", "bye",
 )
+
+# The values the tacho-motor driver accepts for stop_action. Read off
+# this hardware on 2026-08-29: stop_actions is "coast brake hold", and
+# the default is coast.
+STOP_ACTIONS = ("coast", "brake", "hold")
 
 
 class CommandError(Exception):
@@ -343,30 +348,126 @@ class MotorControl(object):
             )
         return node_dir
 
+    def _apply_locked(self, node_dir, address, duty):
+        # type: (str, str, int) -> None
+        """Put one motor into run-direct at one duty. Lock held.
+
+        Shared by run() and drive() so there is exactly one code path
+        that ever starts a motor turning, and exactly one place where
+        the commanded duty is recorded for the watchdog.
+        """
+        problem = write_attr(node_dir, "command", "run-direct")
+        if problem is not None:
+            raise CommandError(
+                "{0}: could not enter run-direct: {1}".format(
+                    address, problem),
+                "write_failed",
+            )
+        problem = write_attr(node_dir, "duty_cycle_sp", duty)
+        if problem is not None:
+            # run-direct is already latched and the setpoint is
+            # whatever it was before. Leaving the driver armed with
+            # an unknown setpoint is the one outcome worth avoiding.
+            write_attr(node_dir, "command", "stop")
+            raise CommandError(
+                "{0}: could not set duty: {1}".format(address, problem),
+                "write_failed",
+            )
+        self._commanded[address] = duty
+
+    def _readback_locked(self, node_dir, address):
+        # type: (str, str) -> dict
+        """What the driver says about this motor now. Lock held.
+
+        Returned with every drive so the host can show commanded against
+        actual without spending a second round trip on a poll. command is
+        not among these: it is write-only on this hardware.
+
+        Deliberately only two values. Measured over USB on 2026-08-29, a
+        sysfs attribute read costs about 9 ms on this brick, and a drive
+        that returned position, state and duty_cycle_sp as well spent
+        144 ms per round trip against 18 ms of actual link time - the
+        readback was 60% of the cost of driving. duty_cycle and speed
+        are what the display needs; the rest is available from `poll`
+        for anything that is not in a control loop.
+        """
+        return {
+            "address": address,
+            "duty_cycle": read_int(node_dir, "duty_cycle"),
+            "speed": read_int(node_dir, "speed"),
+        }
+
     def run(self, address, duty):
         # type: (str, object) -> dict
         duty = clamp_duty(duty)
         with self._lock:
             node_dir = self._resolve_motor(address)
-            problem = write_attr(node_dir, "command", "run-direct")
+            self._apply_locked(node_dir, address, duty)
+            return {"address": address, "duty": duty}
+
+    def drive(self, left_address, left_duty, right_address, right_duty):
+        # type: (str, object, str, object) -> dict
+        """Apply both sides of a tank drive in one message.
+
+        Two motor_run commands per loop iteration would double the round
+        trips, and over Bluetooth PAN the round trip is the whole budget.
+
+        If either side fails, both are stopped before the error is
+        raised. A vehicle with one wheel driving and one refusing is
+        worse than a vehicle that has stopped, and the caller cannot fix
+        it faster than this can.
+        """
+        sides = (
+            ("left", left_address, clamp_duty(left_duty)),
+            ("right", right_address, clamp_duty(right_duty)),
+        )
+        with self._lock:
+            applied = []
+            for name, address, duty in sides:
+                try:
+                    node_dir = self._resolve_motor(address)
+                    self._apply_locked(node_dir, address, duty)
+                except CommandError:
+                    self._stop_all_locked()
+                    raise
+                applied.append((name, address, node_dir))
+            result = {}
+            for name, address, node_dir in applied:
+                result[name] = self._readback_locked(node_dir, address)
+            return result
+
+    def set_stop_action(self, address, value):
+        # type: (str, str) -> dict
+        """Choose what stop means for this motor.
+
+        coast removes the drive and lets the motor freewheel, which is
+        the driver default and measured at 0.66 s of rolling after the
+        watchdog fires. brake and hold both bring it up short. This is
+        the attribute that decides whether a vehicle stops or coasts
+        away when the link dies.
+        """
+        if value not in STOP_ACTIONS:
+            raise CommandError(
+                "stop_action must be one of: {0}".format(
+                    " ".join(STOP_ACTIONS)),
+                "bad_request",
+            )
+        with self._lock:
+            node_dir = self._resolve_motor(address)
+            previous = read_attr(node_dir, "stop_action")
+            problem = write_attr(node_dir, "stop_action", value)
             if problem is not None:
                 raise CommandError(
-                    "{0}: could not enter run-direct: {1}".format(
+                    "{0}: could not set stop_action: {1}".format(
                         address, problem),
                     "write_failed",
                 )
-            problem = write_attr(node_dir, "duty_cycle_sp", duty)
-            if problem is not None:
-                # run-direct is already latched and the setpoint is
-                # whatever it was before. Leaving the driver armed with
-                # an unknown setpoint is the one outcome worth avoiding.
-                write_attr(node_dir, "command", "stop")
-                raise CommandError(
-                    "{0}: could not set duty: {1}".format(address, problem),
-                    "write_failed",
-                )
-            self._commanded[address] = duty
-            return {"address": address, "duty": duty}
+            return {
+                "address": address,
+                "previous": previous,
+                "stop_action": read_attr(node_dir, "stop_action"),
+                "available": read_words(node_dir, "stop_actions"),
+            }
 
     def stop(self, address):
         # type: (str) -> dict
@@ -570,6 +671,14 @@ def dispatch(command, control):
     if name == "motor_run":
         return control.run(require(command, "address"),
                            require(command, "duty"))
+    if name == "drive":
+        return control.drive(require(command, "left_address"),
+                             require(command, "left_duty"),
+                             require(command, "right_address"),
+                             require(command, "right_duty"))
+    if name == "set_stop_action":
+        return control.set_stop_action(require(command, "address"),
+                                       require(command, "value"))
     if name == "motor_stop":
         return control.stop(require(command, "address"))
     if name == "motor_reset":
