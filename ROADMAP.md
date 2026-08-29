@@ -66,6 +66,7 @@ Read off the hardware on **2026-08-29**, over the USB link, by SSH.
 | **Trimming the `drive` readback from six values per side to two cut the round trip from 144 ms to 96 ms** | Measured before and after. It is the single largest thing this project has done for control latency, and it was done by returning less |
 | `ev3ctl drive` works end to end on hardware: `stop_action` reported `coast -> brake`, `w` drove both motors at duty 40 and 325/335 deg/s, `a` counter-rotated at -40/+40, `w`+`a` pivoted at 0/40, `space` and `q` both stopped everything, exit 0, terminal restored | Driven through a pty against the real brick, 2026-08-29. Only a human pressing real keys is untested |
 | A Large Motor at duty 40 turns at roughly **325 to 340 deg/s** | Read back from both motors during `drive` |
+| **The latch test passes. A motor turning under command stops promptly when the USB cable is physically pulled.** | Done on 2026-08-29. outA was commanded to duty 30 and turning at about 198 deg/s when the operator pulled the cable, and reported that it stopped fast. On reconnection - with the brick's uptime continuous, so no reboot intervened - the motor read `duty_cycle` 0, `speed` 0, empty `state`, and `duty_cycle_sp` still 30. That combination is the signature of the brick having written `stop` to itself: the drive removed while the setpoint it was given stays untouched. **This is the test the project exists to pass** |
 | **The motor on outD is mechanically stalled.** At duty 30, 50, 60 and 70 it reports the full commanded `duty_cycle`, `speed` 0, an unchanging `position`, and `state` of `running stalled` | Measured 2026-08-29. It degraded across the session: 335 deg/s, then 158, then 0. It enumerates and accepts commands, so this is not wiring or software - something is jamming the shaft or the motor has failed. **A stalled motor draws heavy current; do not keep driving it** |
 | A stall is detectable from `duty_cycle` and `speed` alone, with no extra attribute read | Non-zero applied duty with zero speed, held for four frames. `state` would say `stalled` outright but costs about 9 ms a side |
 | `ev3ctl scan` runs against the real brick and prints the real kernel, Python, release and battery | Run on 2026-08-29 |
@@ -270,7 +271,6 @@ that the radio belongs to the gamepad is the actual design.
 | Whether the brick itself can offer Bluetooth PAN (NAP) | Not tested. The brick was off the USB bus when the question came up, and with no client on the Mac there was nothing to test against | Only worth answering if a PAN client is found |
 | Whether `hid-sony` binds the DualShock 4 on this kernel | No gamepad has been paired. `hid-sony` is not confirmed present in this kernel build either | **Phase 3.** Pair the controller, then look for the device under `/dev/input/` and check the driver bound to it |
 | That the dashboard's keys drive a motor, and that a device unplugged mid-session empties its row | A motor has now been commanded over the real link and turned, and `ev3ctl scan` shows both motors in the right rows. What has not been exercised on hardware is `ev3ctl live` itself: its key handling, its rescan-on-replug, and its teardown | **Phase 2**, acceptance items 4, 5 and 8 |
-| That a motor stops when the **USB cable is physically pulled** | Both mechanisms that would stop it are now proven on a real turning motor: the watchdog at 0.94 s with the link up and the host silent, and the EOF path at 0.12 s when the link is torn down. What has not been done is the physical act, which is the one case where the link neither closes cleanly nor stays up | **Phase 2**, acceptance item 7. It needs a hand on the cable and cannot be done remotely |
 | Sensor behaviour: `decimals`, `units`, `modes`, and whether mode cycling works | No sensor is attached to this brick | **Phase 2**, acceptance item 6 |
 | Why the brick dropped off the USB bus mid-session on 2026-08-29 | The `en7` interface vanished and the interface list returned byte-identical to the pre-plug baseline, while work was in progress. Cause unknown: cable, power, or an idle shutdown | **Phase 0**, next time the brick is connected. If it recurs, it matters a great deal, because a link that dies on its own is the latch test happening at random |
 | Why the brick is configured for `192.168.137.0/24` when the Mac shares `192.168.2.0/24` | Observed, not explained. `192.168.137.0/24` is the range Windows Internet Connection Sharing uses by default, so a stale profile from another host is the likely story, but that has not been checked in the brick's connman config | Nobody, for now. **It costs this project nothing**: SSH works over IPv6, and nothing here needs the brick to have internet or a working IPv4 address. Worth knowing before anyone spends an afternoon on the IPv4 address |
@@ -454,8 +454,10 @@ item says what to observe and what to check when it does not happen.
    unreadable, in which case the tool prints the raw integer rather than
    guessing the scale.
 
-7. **Latch test.** Set a motor to duty 40, then **pull the USB cable out
-   while it is running.**
+7. **Latch test. PASSED on hardware, 2026-08-29** - see the Verified
+   table. Kept here because it must be re-run whenever anything in the
+   stopping path changes. Set a motor to duty 40, then **pull the USB
+   cable out while it is running.**
    **Observe:** the motor stops within about one second.
    **If not: stop. The watchdog is broken and nothing else in this tool
    may be trusted.** Two independent mechanisms should stop it, and both

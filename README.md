@@ -22,12 +22,12 @@ kernel, Python version, release string, battery and both attached
 motors, and a Large Motor was commanded to duty 40 over the real link
 and turned.
 
-**Both mechanisms that stop a latched motor are measured on hardware:**
-the watchdog cut the drive 0.94 s after the host went silent, and the
-agent's `finally` cut it about 0.12 s after the link was torn down.
-**The physical cable pull has still not been done** — it needs a hand on
-the cable — and neither has `ev3ctl live` itself been exercised on
-hardware. See "Verified" and "Verified in simulation only" in
+**The latch test passes on hardware.** A motor turning under command
+stopped promptly when the USB cable was physically pulled, on
+2026-08-29. The two mechanisms behind it were measured separately
+first: the watchdog cuts the drive 0.94 s after the host goes silent,
+and the agent's `finally` cuts it about 0.12 s after the link is torn
+down. `ev3ctl live` has still not been exercised on hardware. See "Verified" and "Verified in simulation only" in
 [ROADMAP.md](ROADMAP.md); the difference between those two tables is the
 point of them.
 
