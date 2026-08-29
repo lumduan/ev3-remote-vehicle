@@ -270,24 +270,30 @@ newer state replaces older state rather than joining a queue behind it.
 The footer shows the current round trip and a rolling maximum, and that
 maximum is the number that says whether PAN is usable for driving.
 
-### Bringing up Bluetooth PAN
+### Bluetooth PAN does not work from this Mac
 
-**Not yet verified on this brick.** These steps are written from
-expectation and are listed as unverified in [ROADMAP.md](ROADMAP.md)
-until someone has followed them on the hardware and corrected them.
+Tried on 2026-08-29, macOS 26.5.2. The Mac and the brick pair without
+trouble — the brick shows as `ev3dev` and reports Connected — but macOS
+provides **no Bluetooth PAN client**: there is no Bluetooth network
+hardware port, no "Bluetooth PAN" service, and the controller advertises
+no PAN, NAP or BNEP profile. The pairing carries `GATT ACL` and nothing
+that moves IP.
 
-1. On the brick, in Brickman: `Wireless and Networks` → `Bluetooth`.
-   Switch Bluetooth on and make the brick visible.
-2. Pair the Mac with the brick, confirming the passkey on both.
-3. On the brick, connect the paired Mac's *network* service, not just
-   the pairing — Brickman lists it under the paired device.
-4. On the Mac, find the address the brick took, and use it:
-   `uv run ev3ctl drive --host robot@<that address>`.
+No amount of configuration on the brick fixes that; there is nothing on
+this side to connect to. Details and the options are under "Bluetooth
+PAN on macOS" in [ROADMAP.md](ROADMAP.md).
 
-Remember the constraint this project is built around: **the brick has
-one Bluetooth radio, and the gamepad is going to want it.** PAN is
-useful for testing that `drive` is transport-independent. It is not the
-development link, and it cannot coexist with the gamepad.
+If you want a second transport to prove `drive` is transport
+independent, a supported USB WiFi dongle in the brick's host port is the
+usual ev3dev answer and gives the brick a real address:
+
+```bash
+uv run ev3ctl drive --host robot@<the brick's wifi address>
+```
+
+Either way, remember the constraint this project is built around: **the
+brick has one Bluetooth radio, and the gamepad is going to want it.**
+Bluetooth was never the development link here.
 
 ## Repository layout
 

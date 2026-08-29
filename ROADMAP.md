@@ -106,12 +106,51 @@ device on the bare form so both are covered.
 | Unplugging a device empties its row within one refresh | Motor node deleted from the fake tree mid-session; the node list changed, a rescan followed, row A read `empty` |
 | Missing sysfs is survivable | The whole agent run on macOS, where none of `/sys/class/*` exists. Every field returned null, nothing raised |
 
+### Bluetooth PAN on macOS
+
+**Read on 2026-08-29, on macOS 26.5.2.** The Mac and the brick pair
+successfully: the brick appears as `ev3dev`, address `00:17:EC:ED:46:29`,
+and shows as Connected. What it does not do is carry a network.
+
+| Observation | Command |
+| --- | --- |
+| No Bluetooth network hardware port exists at all | `networksetup -listallhardwareports` |
+| No "Bluetooth PAN" network service exists or can be ordered | `networksetup -listallnetworkservices` |
+| The Mac's controller advertises `HFP AVRCP A2DP HID Braille LEA AACP GATT SerialPort` - no PAN, NAP or BNEP | `system_profiler SPBluetoothDataType` |
+| The connected brick's services are `GATT ACL` - a base link with no network profile | same |
+
+The pairing is not the problem and no amount of Brickman configuration
+will fix it: there is no client on this side to connect a PAN to. Apple
+removed Bluetooth PAN from macOS some releases ago, which is consistent
+with everything above, though that is inference rather than something
+read off this machine.
+
+**What this costs the project.** Acceptance item 8 exists to prove that
+`drive` does not care which transport it runs over. It cannot be run
+here. The claim is still true by construction - there is no transport
+code in this repository, only an `ssh` invocation and a `--host` string -
+but "true by construction" is exactly the kind of claim this document
+exists to distrust.
+
+The honest options, none of them urgent:
+
+- **A USB WiFi dongle in the brick's host port.** The standard ev3dev
+  answer, gives the brick a real IP, and proves the same thing item 8
+  was written to prove. A hardware purchase.
+- **A Linux host**, which does still have PAN, if one is to hand.
+- **Accept USB only** and rewrite item 8 to say so. The gamepad is
+  getting the radio in Phase 3 regardless, and this project's own rule
+  has always been that Bluetooth is not a development link.
+
+Note the last one is not a defeat. Item 8 was a nice-to-have; the rule
+that the radio belongs to the gamepad is the actual design.
+
 ### Unverified, and how each one gets resolved
 
 | Claim | Why it is not verified | Resolved by |
 | --- | --- | --- |
-| **Round-trip time over Bluetooth PAN**, typical and maximum | Never measured; PAN has not been brought up. Over USB the same `drive` command measures 96 ms typical, 107 ms maximum, of which only 19 ms is the link. PAN is slower and more variable, and if it approaches the watchdog's 1000 ms the motors will be cut under a held key | **Phase 2a, acceptance item 8.** Record both figures there |
-| The Brickman menu path for bringing up Bluetooth PAN | Written down from expectation, not read off this brick. The brick's Bluetooth has never been used | **Phase 2a, acceptance item 8.** Correct README when the real path is seen |
+| **Round-trip time over Bluetooth PAN**, typical and maximum | **Blocked, not merely unmeasured.** This Mac appears to provide no Bluetooth PAN client at all - see "Bluetooth PAN on macOS" below. Until a second transport exists, `drive` is transport-independent by construction and not by demonstration | **Phase 2a, acceptance item 8**, which needs either a different host or a different second transport |
+| Whether the brick itself can offer Bluetooth PAN (NAP) | Not tested. The brick was off the USB bus when the question came up, and with no client on the Mac there was nothing to test against | Only worth answering if a PAN client is found |
 | Whether `hid-sony` binds the DualShock 4 on this kernel | No gamepad has been paired. `hid-sony` is not confirmed present in this kernel build either | **Phase 3.** Pair the controller, then look for the device under `/dev/input/` and check the driver bound to it |
 | That the dashboard's keys drive a motor, and that a device unplugged mid-session empties its row | A motor has now been commanded over the real link and turned, and `ev3ctl scan` shows both motors in the right rows. What has not been exercised on hardware is `ev3ctl live` itself: its key handling, its rescan-on-replug, and its teardown | **Phase 2**, acceptance items 4, 5 and 8 |
 | That a motor stops when the **USB cable is physically pulled** | Both mechanisms that would stop it are now proven on a real turning motor: the watchdog at 0.94 s with the link up and the host silent, and the EOF path at 0.12 s when the link is torn down. What has not been done is the physical act, which is the one case where the link neither closes cleanly nor stays up | **Phase 2**, acceptance item 7. It needs a hand on the cable and cannot be done remotely |
@@ -429,8 +468,12 @@ happen.
    it; the terminal is restored before anything is sent to the brick,
    precisely so a dead link cannot cost you your shell.
 
-8. **Bluetooth PAN.** Bring PAN up on the brick, unplug USB entirely,
-   and run `ev3ctl drive --host robot@<pan-ip>`.
+8. **Bluetooth PAN. Blocked on this Mac** - see "Bluetooth PAN on
+   macOS" above; macOS 26.5.2 offers no PAN client, so there is nothing
+   for the brick to connect to. Run this against any second transport
+   that does exist, such as a WiFi dongle in the brick's host port.
+   Bring the second transport up, unplug USB entirely, and run
+   `ev3ctl drive --host robot@<its address>`.
    **Observe:** everything above behaves the same, and the footer shows
    a round-trip time. **Record the typical and maximum here.** Over USB
    the same command measures **96 ms** typical on an otherwise idle
