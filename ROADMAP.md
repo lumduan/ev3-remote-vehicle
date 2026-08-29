@@ -163,6 +163,57 @@ addresses over a link that already exists; every failure above is the
 absence of the link itself. PPP would not have needed DHCP either - it
 negotiates addresses itself.
 
+### Bluetooth without IP at all, which very nearly worked
+
+Tried 2026-08-29, and the interesting result of the three.
+
+Everything above assumed the brick needs an IP address, because `ev3ctl`
+reaches it over SSH. **The protocol does not need one.**
+`agent/ev3_agent.py` reads newline-delimited JSON on stdin and writes it
+on stdout; it has no idea SSH exists. Any byte stream will do, and
+Bluetooth RFCOMM is a byte stream.
+
+With the operator's explicit permission to use `sudo` on the brick - an
+exception to the rule in CLAUDE.md, taken deliberately and reverted
+afterwards - the brick was made to offer one:
+
+```
+bluetoothd --compat            # so sdptool may register records at all
+sdptool add --channel=1 SP     # "Serial Port service registered"
+rfcomm watch /dev/rfcomm0 1 <wrapper that execs the agent on that tty>
+```
+
+All runtime only; nothing was installed and nothing survives a reboot.
+
+**What was demonstrated.** macOS noticed the new profile and created
+`/dev/tty.ev3dev` and `/dev/cu.ev3dev`, which had not existed before. On
+the first connection, bytes crossed: a JSON command written on the Mac
+arrived at the brick, the brick's tty echoed it back, and the wrapper
+ran. **No IP, no SSH, no PPP, no DHCP anywhere in that path.**
+
+**What was not.** No protocol round trip ever completed. The agent was
+missing from `/tmp` at that moment - the brick had rebooted, and `/tmp`
+does not survive that - so it exited before replying. By the time the
+agent was back in place, macOS would no longer open the channel at all:
+`open("/dev/cu.ev3dev")` succeeds and writes succeed, while a listener
+on the brick sees nothing for 25 s. It connected exactly once, minutes
+after the SDP record was registered, and never again. That is consistent
+with macOS caching an RFCOMM session and satisfying later opens against
+the cache without re-establishing anything; clearing it would mean
+restarting the Mac's Bluetooth daemon or re-pairing, neither of which
+was worth doing to the operator's other devices.
+
+**What it means for this project.** The transport independence that
+acceptance item 8 exists to prove is real, and stronger than the item
+assumed: the agent is a byte-stream program, so the question is not
+"which network" but "which stream". A serial transport beside the SSH
+one in `link.py` would be perhaps forty lines.
+
+It is still the wrong thing to build. The brick has one radio, Phase 3
+gives it to the DualShock 4, and a development link that competes with
+the gamepad is the exact mistake this project's design was built to
+avoid. Recorded because it is true, not because it should be pursued.
+
 The honest options, none of them urgent:
 
 - **A USB WiFi dongle in the brick's host port.** The standard ev3dev

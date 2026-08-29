@@ -288,13 +288,16 @@ why: DHCP hands out addresses over a link that already exists, and PAN
 is what would have created that link. There is no link for it to run
 over.
 
-PPP over a Bluetooth serial link was tried next and does not work
-either: the brick has no `pppd` installed and advertises no Serial Port
-profile, so there is nothing to run PPP over and no way to add it
-without installing software on a brick that has no internet. The
-`/dev/tty.EV3` serial port on the Mac belongs to a different Bluetooth
-address than the one this brick's adapter reports. Details in
-[ROADMAP.md](ROADMAP.md).
+PPP over a Bluetooth serial link does not work either: the brick has no
+`pppd` and cannot be given one. But there is a third route that does not
+need IP at all — the agent reads JSON on stdin and writes it on stdout,
+so any byte stream will do, and Bluetooth RFCOMM is a byte stream. Made
+to offer a Serial Port profile, the brick did carry a command over
+Bluetooth with no IP, SSH, PPP or DHCP involved. macOS would then not
+reopen the channel, so no round trip was ever completed. The full
+account is in [ROADMAP.md](ROADMAP.md); the short version is that the
+transport independence is real and building on it would still be a
+mistake, because the radio belongs to the gamepad.
 
 If you want a second transport to prove `drive` is transport
 independent, a supported USB WiFi dongle in the brick's host port is the
