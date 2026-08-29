@@ -67,6 +67,11 @@ RTT_WINDOW_S = 10.0
 
 STOP_ACTION = "brake"
 
+# A motor that is being driven and is not turning is stalled. Require
+# it to hold for a few frames: speed is legitimately zero for the
+# first moments after a motor is commanded from rest.
+STALL_FRAMES = 4
+
 QUIT_KEYS = ("q",)
 ZERO_KEYS = ("SPACE",)
 BOUND_KEYS = tuple(MOVEMENT_KEYS) + QUIT_KEYS + ZERO_KEYS + ("CTRL_C",)
@@ -100,6 +105,8 @@ class Drive(object):
 
         self.readback = {}
         self.watchdog_trips = 0
+        self.stalled = set()
+        self._stall_frames = {"left": 0, "right": 0}
         self._was_cut = False
         self._was_zero = True
 
@@ -230,6 +237,7 @@ class Drive(object):
             self.readback = result
             if answered:
                 self.check_for_cut(result, commanded)
+                self.check_stall(result, commanded)
 
     def observe_rtt(self, seconds):
         now = time.monotonic()
@@ -267,6 +275,32 @@ class Drive(object):
         if cut and not self._was_cut:
             self.watchdog_trips += 1
         self._was_cut = cut
+
+    def check_stall(self, result, commanded):
+        """Flag a motor that is being driven and is not turning.
+
+        Free: it needs only the two values the reply already carries.
+        The driver would say `stalled` outright in its `state`, but
+        fetching that attribute costs about 9 ms a side on this brick -
+        a fifth of the round trip - and a motor commanded non-zero,
+        whose driver reports it is applying that duty, with a speed of
+        zero, is stalled by definition.
+
+        This exists because a real motor stalled during testing and the
+        dashboard had nothing to say about it.
+        """
+        for side, asked in (("left", commanded[0]),
+                            ("right", commanded[1])):
+            entry = result.get(side) or {}
+            driving = bool(asked) and bool(entry.get("duty_cycle"))
+            if driving and entry.get("speed") == 0:
+                self._stall_frames[side] += 1
+            else:
+                self._stall_frames[side] = 0
+            if self._stall_frames[side] >= STALL_FRAMES:
+                self.stalled.add(side)
+            else:
+                self.stalled.discard(side)
 
     def note(self, message):
         self.last_error = message

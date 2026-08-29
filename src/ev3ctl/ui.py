@@ -327,12 +327,15 @@ def drive_motors_table(drive):
     )
     for name, address, commanded, inverted in sides:
         live = (drive.readback or {}).get(name) or {}
+        speed = number(live.get("speed"))
+        if name in getattr(drive, "stalled", ()):
+            speed = "[fail]STALL[/fail]"
         table.add_row(
             name,
             text(address) + (" [warn]inv[/warn]" if inverted else ""),
             number(commanded),
             number(live.get("duty_cycle")),
-            number(live.get("speed")),
+            speed,
         )
     return table
 
@@ -361,6 +364,12 @@ def drive_footer(drive):
             drive.repeat_hold * 1000, drive.slew_limit)))
 
     grid.add_row(Text.from_markup(DRIVE_HELP))
+    stalled = sorted(getattr(drive, "stalled", ()))
+    if stalled:
+        grid.add_row(Text.from_markup(
+            "[fail]STALLED: " + ", ".join(stalled)
+            + " - driven but not turning. Something is jamming it, or the "
+            "motor has failed. A stalled motor draws heavy current.[/fail]"))
     if drive.last_error:
         grid.add_row(Text.from_markup(
             "[fail]" + _one_line(drive.last_error) + "[/fail]"))

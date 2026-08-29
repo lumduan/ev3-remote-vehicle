@@ -66,6 +66,8 @@ Read off the hardware on **2026-08-29**, over the USB link, by SSH.
 | **Trimming the `drive` readback from six values per side to two cut the round trip from 144 ms to 96 ms** | Measured before and after. It is the single largest thing this project has done for control latency, and it was done by returning less |
 | `ev3ctl drive` works end to end on hardware: `stop_action` reported `coast -> brake`, `w` drove both motors at duty 40 and 325/335 deg/s, `a` counter-rotated at -40/+40, `w`+`a` pivoted at 0/40, `space` and `q` both stopped everything, exit 0, terminal restored | Driven through a pty against the real brick, 2026-08-29. Only a human pressing real keys is untested |
 | A Large Motor at duty 40 turns at roughly **325 to 340 deg/s** | Read back from both motors during `drive` |
+| **The motor on outD is mechanically stalled.** At duty 30, 50, 60 and 70 it reports the full commanded `duty_cycle`, `speed` 0, an unchanging `position`, and `state` of `running stalled` | Measured 2026-08-29. It degraded across the session: 335 deg/s, then 158, then 0. It enumerates and accepts commands, so this is not wiring or software - something is jamming the shaft or the motor has failed. **A stalled motor draws heavy current; do not keep driving it** |
+| A stall is detectable from `duty_cycle` and `speed` alone, with no extra attribute read | Non-zero applied duty with zero speed, held for four frames. `state` would say `stalled` outright but costs about 9 ms a side |
 | `ev3ctl scan` runs against the real brick and prints the real kernel, Python, release and battery | Run on 2026-08-29 |
 
 **The address prefix.** This project assumed a motor's `address` would
@@ -614,6 +616,33 @@ happen.
     not a code change.
 
 **Pass:** 7, 9 and 10. Item 9 is the one this phase exists for.
+
+### A stall the dashboard could not see
+
+Found on 2026-08-29, after this phase was written. The motor on outD
+stalled during testing - full duty applied, zero speed, `state` reading
+`running stalled` - and `ev3ctl drive` showed nothing but a speed of
+zero, which looks identical to a motor that has simply been asked to
+stop.
+
+The cause was a decision made earlier in this same phase. The `drive`
+readback had been trimmed from six values per side to two to cut the
+round trip from 144 ms to 96 ms, and `state` was one of the four
+dropped. The trim was right and the round trip matters; what was wrong
+was concluding that nothing was lost with it.
+
+The fix costs nothing. A motor commanded non-zero, whose driver reports
+it is applying that duty, with a speed of zero, is stalled by
+definition - and both of those values were already in the reply. Held
+for four frames so that spin-up from rest does not trip it, and shown
+as `STALL` in the speed column with a banner in the footer. Verified
+against the real stalled motor.
+
+The general lesson is worth more than the fix: **an optimisation that
+removes data removes diagnostics with it, and the diagnostics are missed
+later than the latency is.**
+
+
 
 ## Phase 3: Gamepad pairing and evdev event-code mapping
 
