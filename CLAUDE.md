@@ -127,6 +127,13 @@ Three rules follow from it, and they are not optional:
    running, unplugging the cable must stop it within about a second.
    Anything else means the watchdog is broken, and nothing else in the
    project can be trusted until it is fixed.
+4. **Stopping the drive is not the same as stopping the robot.**
+   `stop_action` on these motors is `coast`. Measured on 2026-08-29: the
+   watchdog cuts the drive inside a second, and the motor then freewheels
+   for a further 0.66 s. Every claim in this repository that something
+   "stops" means the drive was removed. Once this project has wheels
+   under it, decide `brake` or `hold` deliberately rather than inheriting
+   `coast` by default. See Phase 5 in [ROADMAP.md](ROADMAP.md).
 
 Two failures that look alike and are not:
 

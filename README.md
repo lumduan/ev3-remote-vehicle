@@ -17,13 +17,24 @@ brick over SSH, shows every motor and sensor live at 5 Hz, and drives
 motors from the keyboard so you can find out what is plugged into which
 port before building anything.
 
-`ev3ctl scan` **has** run against the real brick, on 2026-08-29, and
-read back its kernel, Python version, release string, battery and both
-attached motors. **No motor has been commanded over the real link, and
-the cable-pull latch test has not been run**, so everything from
-acceptance item 3 down is still simulation only. See "Verified" and
-"Verified in simulation only" in [ROADMAP.md](ROADMAP.md); the
-difference between those two tables is the point of them.
+`ev3ctl` runs against the real brick. On 2026-08-29 it read back the
+kernel, Python version, release string, battery and both attached
+motors, and a Large Motor was commanded to duty 40 over the real link
+and turned.
+
+**Both mechanisms that stop a latched motor are measured on hardware:**
+the watchdog cut the drive 0.94 s after the host went silent, and the
+agent's `finally` cut it about 0.12 s after the link was torn down.
+**The physical cable pull has still not been done** — it needs a hand on
+the cable — and neither has `ev3ctl live` itself been exercised on
+hardware. See "Verified" and "Verified in simulation only" in
+[ROADMAP.md](ROADMAP.md); the difference between those two tables is the
+point of them.
+
+**"Stopped" means the drive was removed, not that motion ended.**
+`stop_action` is `coast`, so a motor freewheels for about another 0.66 s
+after the watchdog cuts it. That is invisible on a bench and matters a
+great deal on something with wheels.
 
 Nothing in this repository claims to have been tested on a brick unless
 it appears in the Verified table in [ROADMAP.md](ROADMAP.md).
