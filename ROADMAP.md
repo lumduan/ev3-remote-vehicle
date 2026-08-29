@@ -52,6 +52,12 @@ Read off the hardware on **2026-08-29**, over the USB link, by SSH.
 | `count_per_rot` is **360** on the EV3 Large Motor on this driver | `cat /sys/class/tacho-motor/*/count_per_rot`. It is read, not assumed; the code still refuses to default to 360 |
 | `run-direct` **is** in every motor's `commands` list | `commands` reads `run-forever run-to-abs-pos run-to-rel-pos run-timed run-direct stop reset` |
 | No sensors are attached: `/sys/class/lego-sensor/` is empty | `ls` on the brick |
+| **`command` is write-only** (`--w--w----`). It can be written and never read back | `ls -l /sys/class/tacho-motor/*/command`. The agent only ever writes it, so the code is unaffected, but a test cannot assert on it - observe `state`, `speed` and `duty_cycle` instead |
+| **The watchdog stops a real motor.** Commanded to duty 40 over the real link, then the host went silent: drive was cut **0.94 s** after the last command, against a 1.0 s timeout | Sampled at ~16 Hz by a Python observer on the brick, on a second SSH connection so that watching could not itself count as a command |
+| **The EOF path stops a real motor.** Same setup, link then torn down: drive was cut about **0.12 s** after the teardown | The agent's `finally` running `stop_all`, faster than the watchdog because EOF arrives at once |
+| A Large Motor at duty 40 turns at roughly **319 deg/s** | Same traces |
+| `stop_action` is **`coast`**, and `stop_actions` offers `coast brake hold` | `cat` on the brick |
+| **"Stopped" means drive removed, not motion ended.** After the drive was cut the motor freewheeled for a further **0.66 s** before reaching zero speed | The same traces. See the note under Phase 5 |
 | `ev3ctl scan` runs against the real brick and prints the real kernel, Python, release and battery | Run on 2026-08-29 |
 
 **The address prefix.** This project assumed a motor's `address` would
@@ -97,8 +103,8 @@ device on the bare form so both are covered.
 | Claim | Why it is not verified | Resolved by |
 | --- | --- | --- |
 | Whether `hid-sony` binds the DualShock 4 on this kernel | No gamepad has been paired. `hid-sony` is not confirmed present in this kernel build either | **Phase 3.** Pair the controller, then look for the device under `/dev/input/` and check the driver bound to it |
-| That a motor actually turns when commanded, and that `Cmd` and `Duty` track | `ev3ctl scan` has run against the brick; `ev3ctl live` has not, and no motor has been commanded over the real link. The port grid bug was found and fixed but the fix has not been seen working on hardware | **Phase 2**, acceptance items 3 to 6 |
-| **That a motor stops within a second when the USB cable is pulled** | The watchdog and the EOF path both work in simulation. Neither has been tested against a motor that is actually turning. **This is the one that matters** | **Phase 2**, acceptance item 7 |
+| That the dashboard's keys drive a motor, and that a device unplugged mid-session empties its row | A motor has now been commanded over the real link and turned, and `ev3ctl scan` shows both motors in the right rows. What has not been exercised on hardware is `ev3ctl live` itself: its key handling, its rescan-on-replug, and its teardown | **Phase 2**, acceptance items 4, 5 and 8 |
+| That a motor stops when the **USB cable is physically pulled** | Both mechanisms that would stop it are now proven on a real turning motor: the watchdog at 0.94 s with the link up and the host silent, and the EOF path at 0.12 s when the link is torn down. What has not been done is the physical act, which is the one case where the link neither closes cleanly nor stays up | **Phase 2**, acceptance item 7. It needs a hand on the cable and cannot be done remotely |
 | Sensor behaviour: `decimals`, `units`, `modes`, and whether mode cycling works | No sensor is attached to this brick | **Phase 2**, acceptance item 6 |
 | Why the brick dropped off the USB bus mid-session on 2026-08-29 | The `en7` interface vanished and the interface list returned byte-identical to the pre-plug baseline, while work was in progress. Cause unknown: cable, power, or an idle shutdown | **Phase 0**, next time the brick is connected. If it recurs, it matters a great deal, because a link that dies on its own is the latch test happening at random |
 | Why the brick is configured for `192.168.137.0/24` when the Mac shares `192.168.2.0/24` | Observed, not explained. `192.168.137.0/24` is the range Windows Internet Connection Sharing uses by default, so a stale profile from another host is the likely story, but that has not been checked in the brick's connman config | Nobody, for now. **It costs this project nothing**: SSH works over IPv6, and nothing here needs the brick to have internet or a working IPv4 address. Worth knowing before anyone spends an afternoon on the IPv4 address |
@@ -189,13 +195,16 @@ claims to know things it has not checked is worse than no scaffold.
 
 ## Phase 2: Port and device diagnostic CLI
 
-**Status: implemented. Acceptance items 1 and 2 done on hardware;
-3 to 9 outstanding.** `ev3ctl scan` has run against the real brick and
+**Status: implemented. Acceptance items 1, 2, 3 and the substance of 7
+done on hardware; 4, 5, 6, 8 and 9 outstanding.** `ev3ctl scan` has run against the real brick and
 printed its real kernel, Python version, release and battery; those
 readings are in the Verified table above.
 
-**No motor has been commanded over the real link, and the latch test has
-not been run.** Everything from item 3 down is still simulation only.
+A motor **has** now been commanded over the real link and turned, and
+both mechanisms that stop a latched motor have been measured on it: the
+watchdog cut the drive 0.94 s after the host went silent, and the EOF
+path cut it 0.12 s after the link was torn down. **The physical cable
+pull itself has still not been done**, and it cannot be done remotely.
 Running against the brick found three bugs that no amount of simulation
 would have: an SSH control socket path too long for `sockaddr_un`, a
 troubleshooting checklist that told the operator to use `ping` when
@@ -368,6 +377,16 @@ self-contained toy.
 **Goal.** The vehicle behaves correctly when things go wrong, because
 they will. A child will switch the controller off mid-drive, drive it
 into a wall and hold the throttle there, and run the battery flat.
+
+**`stop_action` is `coast`, and that is a decision this phase has to
+make deliberately.** Measured on 2026-08-29: when the watchdog cuts a
+motor at duty 40, the drive stops in under a second but the motor
+freewheels for a further 0.66 s before it is actually still. On a bench
+that is invisible. On a vehicle it means the car keeps rolling after the
+link dies, and rolls further the faster it was going. `stop_actions`
+offers `coast`, `brake` and `hold`. Nothing in this project sets it yet,
+so the driver default applies. Whether a safety stop should brake rather
+than coast is a Phase 5 question, and the answer is probably yes.
 
 **Acceptance test.** Each case is provoked deliberately on the physical
 robot:
