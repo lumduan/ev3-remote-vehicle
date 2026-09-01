@@ -202,14 +202,16 @@ rules as for motors: read the facts, never assume them.
   `/dev/input/event4` is an observation from one session, not a stable
   path, and `/dev/input/by-id/` does not exist on this brick. Parse
   `/proc/bus/input/devices`. The Name seeds the search and is matched on
-  **equality**, never a substring - hid-sony creates three input devices
-  for one DualShock 4 - but what decides whether two event devices are
-  one physical controller is `Uniq`, the pad's own Bluetooth address,
-  which is the same on both transports while the Name need not be. Two
-  event devices sharing a `Uniq` means the pad is on Bluetooth and USB
-  at once; refuse to proceed, because the transports use different HID
-  report layouts. Name remains the fallback when `Uniq` is empty, and
-  which was used is reported rather than left to be guessed.
+  **equality**, never a substring. Identity is the **pair** (`Uniq`,
+  `Name`), and neither half works alone: hid-sony gives one controller
+  three input devices that all share its `Uniq`, so `Uniq` alone returns
+  three and calls every run ambiguous, while `Name` alone cannot tell
+  two controllers of the same model apart. Separate the three by the
+  device's own `KEY` mask - only the gamepad declares `BTN_SOUTH` - and
+  never by a `js` handler: joydev is not loaded on this brick. Refuse to
+  proceed only when one Name is carried by two different `Uniq` values,
+  which is two controllers rather than one. Name is the fallback when
+  `Uniq` is empty, and which was used is reported rather than guessed.
 - **`struct input_event` is 16 bytes here, not 24.** `struct timeval` is
   two 32-bit longs on this kernel. Use `struct.Struct("=llHHi")`; the
   native `"@llHHi"` is 24 on any 64-bit development machine and parsing
@@ -229,6 +231,17 @@ rules as for motors: read the facts, never assume them.
   that is unavailable, write null. The usual evdev polarity convention
   is recorded as agreeing or disagreeing with what was measured, and is
   never consulted to decide anything.
+- **The D-pad is a hat, not four buttons.** `ABS=3003f` declares
+  `ABS_HAT0X` and `ABS_HAT0Y` with a range of 2, so code that listens
+  only for `EV_KEY` records nothing when the D-pad is pressed. Read a
+  hat from the accumulated window's extremes rather than its current
+  value: a press and release inside one 200 ms poll is back at zero
+  before anything looks at it.
+- **A stick does not rest at the midpoint of its range.** Measured
+  2026-09-01: `ABS_Y` rests at 115 of 0-255, so it has 115 counts of
+  travel one way and 140 the other. Record each direction separately and
+  normalise against its own extent; one symmetric divisor makes one
+  direction 22 percent stronger than the other.
 - **Aggregate on the brick.** A round trip is about 96 ms idle and
   168 ms under load. Events are accumulated into counters by a reader
   thread and the host asks for the counters; individual events are never

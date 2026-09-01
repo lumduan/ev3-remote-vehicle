@@ -35,8 +35,12 @@ def agent():
     return namespace
 
 
-# The shape hid-sony actually produces: one controller, three input
-# devices. Taken from the fields ROADMAP.md records for this pad.
+# Verbatim from this brick on 2026-09-01, with the controller connected
+# over Bluetooth. Not a hypothetical: these are the exact three blocks
+# hid-sony produces for one DualShock 4, with the real capability masks.
+# The EV3's own buttons are prepended as they appear in the same file.
+# The S: Sysfs lines are omitted: nothing here reads them and the real
+# ones run past the line limit.
 THREE_DEVICES = '''\
 I: Bus=0019 Vendor=0001 Product=0001 Version=0100
 N: Name="EV3 Brick Buttons"
@@ -45,51 +49,73 @@ S: Sysfs=/devices/platform/gpio_keys/input/input0
 U: Uniq=
 H: Handlers=kbd event0
 B: EV=100003
-
-I: Bus=0005 Vendor=054c Product=09cc Version=8100
-N: Name="Wireless Controller"
-P: Phys=00:17:ec:ed:46:29
-S: Sysfs=/devices/virtual/misc/uhid/0005:054C:09CC.0004/input/input8
-U: Uniq=00:22:68:f2:5c:b6
-H: Handlers=event4 js0
-B: EV=20000b
-B: ABS=3003f
+B: KEY=1680 0 0 10000000
 
 I: Bus=0005 Vendor=054c Product=09cc Version=8100
 N: Name="Wireless Controller Touchpad"
 P: Phys=00:17:ec:ed:46:29
 U: Uniq=00:22:68:f2:5c:b6
-H: Handlers=event5 mouse1
-B: ABS=260800000000003
+H: Handlers=event2
+B: PROP=5
+B: EV=b
+B: KEY=2420 0 10000 0 0 0 0 0 0 0 0
+B: ABS=2608000 0
 
 I: Bus=0005 Vendor=054c Product=09cc Version=8100
 N: Name="Wireless Controller Motion Sensors"
 P: Phys=00:17:ec:ed:46:29
 U: Uniq=00:22:68:f2:5c:b6
-H: Handlers=event6
-B: ABS=7fff000000000000
-'''
+H: Handlers=event3
+B: PROP=40
+B: EV=19
+B: ABS=3f
+B: MSC=20
 
-# One pad on Bluetooth and USB at once, with the Name differing between
-# the transports and the Uniq the same. That is the case identity by
-# Uniq exists for: the guard has to catch this, and a Name comparison
-# would not. The exact USB Name string is a hypothesis until both
-# transports have been seen - see ROADMAP.md, "Names by transport".
-TWO_TRANSPORTS = '''\
 I: Bus=0005 Vendor=054c Product=09cc Version=8100
 N: Name="Wireless Controller"
 P: Phys=00:17:ec:ed:46:29
 U: Uniq=00:22:68:f2:5c:b6
-H: Handlers=event4 js0
+H: Handlers=event4
+B: PROP=0
+B: EV=20001b
+B: KEY=7fdb0000 0 0 0 0 0 0 0 0 0
+B: ABS=3003f
+B: MSC=10
+B: FF=1 7030000 0 0
+'''
+
+# One controller's gamepad function plus its touchpad, as a template for
+# building multi-controller fixtures.
+ONE_PAD = '''\
+I: Bus=0005 Vendor=054c Product=09cc Version=8100
+N: Name={name}
+P: Phys=00:17:ec:ed:46:29
+U: Uniq={uniq}
+H: Handlers={event}
+B: KEY=7fdb0000 0 0 0 0 0 0 0 0 0
 B: ABS=3003f
 
-I: Bus=0003 Vendor=054c Product=09cc Version=8111
-N: Name="Sony Interactive Entertainment Wireless Controller"
-P: Phys=usb-ohci-omap3.1-1.2/input0
-U: Uniq=00:22:68:f2:5c:b6
-H: Handlers=event7 js1
-B: ABS=3003f
+I: Bus=0005 Vendor=054c Product=09cc Version=8100
+N: Name="Wireless Controller Touchpad"
+P: Phys=00:17:ec:ed:46:29
+U: Uniq={uniq}
+H: Handlers={touchpad}
+B: KEY=2420 0 10000 0 0 0 0 0 0 0 0
+B: ABS=2608000 0
+
 '''
+
+
+def pad(uniq, event, touchpad, name='"Wireless Controller"'):
+    return ONE_PAD.format(uniq=uniq, event=event, touchpad=touchpad,
+                          name=name)
+
+
+# Two physically separate controllers of the same model. Same Name,
+# different Uniq: the ambiguity that actually matters, because picking
+# either would be picking one at random.
+TWO_CONTROLLERS = (pad("00:22:68:f2:5c:b6", "event4", "event2")
+                   + pad("00:22:68:aa:bb:cc", "event9", "event7"))
 
 
 # ---------------------------------------------------------------------
@@ -127,61 +153,90 @@ def select(agent, text, name="Wireless Controller", uniq=None):
     return agent["select_gamepad"](blocks, name, uniq)
 
 
-def test_identity_uses_uniq_when_the_device_reports_one(agent):
+def test_identity_is_the_uniq_and_name_pair(agent):
+    """Neither field alone identifies one function of one controller.
+
+    All three of hid-sony's devices carry the same Uniq, so Uniq alone
+    would return three and call every run ambiguous. Name alone would
+    not tell two controllers of the same model apart.
+    """
     chosen, source, value = select(agent, THREE_DEVICES)
-    assert source == "uniq"
-    assert value == "00:22:68:f2:5c:b6"
+    assert source == "uniq+name"
+    assert value == "00:22:68:f2:5c:b6 / Wireless Controller"
     assert len(chosen) == 1
     assert chosen[0]["event"] == "event4"
 
 
-def test_the_siblings_sharing_that_uniq_are_not_candidates(agent):
-    """All three of hid-sony's devices carry the same Uniq.
+def test_btn_south_separates_the_pad_from_its_two_siblings(agent):
+    """The real KEY masks, read off this brick on 2026-09-01.
 
-    Grouping on Uniq alone would call every run ambiguous, so the group
-    is narrowed to the gamepad function - by exact Name, or by joydev
-    having bound a js handler. The touchpad gets a mouse handler and the
-    motion sensors get neither.
+    An earlier version tested for a `js` handler. There is no js node on
+    this brick and joydev is not loaded, so that test never fired.
     """
+    blocks = agent["parse_input_devices"](THREE_DEVICES)
+    declares = {b["name"]: agent["mask_has_bit"](b["key_mask"], 0x130)
+                for b in blocks}
+    assert declares["Wireless Controller"] is True
+    assert declares["Wireless Controller Touchpad"] is False
+    assert declares["Wireless Controller Motion Sensors"] is False
+
+
+def test_the_mask_reader_counts_words_not_characters(agent):
+    """%lx prints no leading zeros, so a word can be short.
+
+    BTN_SOUTH is bit 304, which is bit 16 of word 9. The gamepad's mask
+    has exactly ten words, and the leading one is only eight characters.
+    """
+    has = agent["mask_has_bit"]
+    assert has("7fdb0000 0 0 0 0 0 0 0 0 0", 0x130) is True
+    assert has("7fdb0000 0 0 0 0", 0x130) is False, "too few words"
+    assert has("1 0", 32) is True
+    assert has("1", 0) is True
+    assert has(None, 0x130) is False
+    assert has("", 0x130) is False
+
+
+def test_same_uniq_with_different_names_is_one_controller(agent):
+    """The ordinary case, and it must not be refused.
+
+    This is what the hardware does on every connection: one controller,
+    three functions, one Uniq, three Names.
+    """
+    blocks = agent["parse_input_devices"](THREE_DEVICES)
     chosen, _, _ = select(agent, THREE_DEVICES)
-    names = [b["name"] for b in chosen]
-    assert names == ["Wireless Controller"]
+    assert agent["rival_controllers"](chosen) == []
+    assert len({b["uniq"] for b in blocks if b["uniq"]}) == 1
 
 
-def test_two_transports_are_caught_even_when_the_names_differ(agent):
-    """The reason identity is Uniq and not Name.
-
-    A Name comparison finds one device here and would let the wizard
-    proceed against whichever transport it happened to pick. The two use
-    different HID report layouts, so that mapping would be wrong without
-    ever looking wrong.
-    """
-    blocks = agent["parse_input_devices"](TWO_TRANSPORTS)
-    by_name = [b for b in blocks if b["name"] == "Wireless Controller"]
-    assert len(by_name) == 1, "a Name comparison sees only one"
-
-    chosen, source, value = select(agent, TWO_TRANSPORTS)
-    assert source == "uniq"
-    assert len(chosen) == 2, "identity by Uniq sees both"
-    assert {b["bus"] for b in chosen} == {0x05, 0x03}
+def test_same_name_with_different_uniq_is_two_controllers(agent):
+    """The ambiguity guard fires here and nowhere else."""
+    chosen, source, _ = select(agent, TWO_CONTROLLERS)
+    assert [b["event"] for b in chosen] == ["event4", "event9"]
+    rivals = agent["rival_controllers"](chosen)
+    assert len(rivals) == 2
+    assert {b["uniq"] for b in rivals} == {"00:22:68:f2:5c:b6",
+                                           "00:22:68:aa:bb:cc"}
 
 
 def test_name_is_the_fallback_when_uniq_is_empty(agent):
-    text = TWO_TRANSPORTS.replace("U: Uniq=00:22:68:f2:5c:b6", "U: Uniq=")
+    text = THREE_DEVICES.replace("U: Uniq=00:22:68:f2:5c:b6", "U: Uniq=")
     chosen, source, value = select(agent, text)
     assert source == "name"
     assert value == "Wireless Controller"
     assert len(chosen) == 1
 
 
-def test_an_explicit_uniq_skips_the_name_search_entirely(agent):
+def test_an_explicit_uniq_still_narrows_to_the_gamepad(agent):
+    """--uniq picks the controller; BTN_SOUTH picks its gamepad half.
+
+    Case-insensitive: bluetoothctl prints the address upper-case and
+    /proc prints it lower-case, for the same controller.
+    """
     chosen, source, value = select(
         agent, THREE_DEVICES, name="something else",
         uniq="00:22:68:F2:5C:B6")
     assert source == "uniq"
-    # Case-insensitive: bluetoothctl prints the address upper-case and
-    # /proc prints it lower-case, for the same controller.
-    assert len(chosen) == 3
+    assert [b["event"] for b in chosen] == ["event4"]
 
 
 def test_a_device_with_no_event_node_is_never_a_candidate(agent):
@@ -198,7 +253,21 @@ def test_fields_are_read_off_the_block(agent):
     assert pad["bus"] == 0x05
     assert pad["vendor"] == 0x054C
     assert pad["abs_mask"] == "3003f"
-    assert "js0" in pad["handlers"]
+    assert pad["key_mask"] == "7fdb0000 0 0 0 0 0 0 0 0 0"
+
+
+def test_there_is_no_joystick_handler_on_this_brick(agent):
+    """joydev is not loaded here, so no js node is ever created.
+
+    /dev/input/ holds event0 to event4 and by-path, and `lsmod` has no
+    joydev entry. Recorded as a test because an earlier version of the
+    device discovery leaned on a `js` handler to tell the gamepad from
+    its two siblings, and that test could never have fired.
+    """
+    blocks = agent["parse_input_devices"](THREE_DEVICES)
+    for block in blocks:
+        for handler in block["handlers"]:
+            assert not handler.startswith("js"), block["name"]
 
 
 def test_empty_uniq_is_none_not_empty_string(agent):
@@ -1143,3 +1212,159 @@ def test_redo_inside_a_hold_keeps_the_sweep(tmp_path):
     assert wiz.step_axes == pair
     assert wiz.phase == gamepad.HOLD_RIGHT
     assert wiz.armed is False, "a redo re-opens the window"
+
+
+# ---------------------------------------------------------------------
+# The D-pad is a hat, not four buttons
+# ---------------------------------------------------------------------
+
+def test_the_dpad_axes_are_declared_by_this_hardware():
+    """ABS=3003f carries bits 16 and 17, so the D-pad is a hat."""
+    codes = gamepad.axis_codes_from_mask("3003f")
+    assert 16 in codes and 17 in codes
+    assert evdev_codes.code_name(evdev_codes.EV_ABS, 16) == "ABS_HAT0X"
+    assert evdev_codes.code_name(evdev_codes.EV_ABS, 17) == "ABS_HAT0Y"
+    assert evdev_codes.is_hat(evdev_codes.EV_ABS, 17)
+
+
+def test_a_hat_press_is_read_from_the_window_not_the_latest_value():
+    """A press and release inside one 200 ms poll is back at zero.
+
+    Reading `latest` would record nothing for a normal D-pad tap. The
+    window's extremes still carry it.
+    """
+    tapped = gamepad.rows_to_codes(
+        [row(3, 0x11, 0, -1, 0, count=2)])[(3, 0x11)]
+    assert tapped["latest"] == 0
+    assert gamepad.press_value((3, 0x11), tapped) == -1
+
+
+def test_up_and_down_are_the_same_hat_code_with_opposite_signs():
+    up = gamepad.rows_to_codes([row(3, 0x11, -1, -1, 0, count=2)])[(3, 0x11)]
+    down = gamepad.rows_to_codes([row(3, 0x11, 1, 0, 1, count=2)])[(3, 0x11)]
+    assert gamepad.press_value((3, 0x11), up) == -1
+    assert gamepad.press_value((3, 0x11), down) == 1
+
+
+def test_a_button_press_is_also_read_from_the_window():
+    tapped = gamepad.rows_to_codes(
+        [row(1, 0x130, 0, 0, 1, count=2)])[(1, 0x130)]
+    assert gamepad.press_value((1, 0x130), tapped) == 1
+
+
+def test_an_untouched_code_is_not_a_press():
+    idle = gamepad.rows_to_codes(
+        [row(3, 0x11, 0, 0, 0, count=0)])[(3, 0x11)]
+    assert gamepad.press_value((3, 0x11), idle) is None
+    quiet = gamepad.rows_to_codes(
+        [row(1, 0x130, 0, 0, 0, count=2)])[(1, 0x130)]
+    assert gamepad.press_value((1, 0x130), quiet) is None
+
+
+def test_step_six_records_all_four_dpad_directions(tmp_path):
+    """Four prompts, two hat axes, and the window reset that allows it.
+
+    Without a fresh window per prompt the hat accumulates: up leaves -1
+    in the minimum and down leaves +1 in the maximum, so the third and
+    fourth prompts would find nothing new on either axis.
+    """
+    from ev3ctl.cli.gamepad import Wizard
+    session = FakeSession()
+    wiz = Wizard(session, str(tmp_path / "m.json"))
+    wiz.session = session
+    wiz.step = gamepad.BUTTONS
+    wiz.armed = True
+    wiz.button_index = gamepad.BUTTON_PROMPTS.index("D-pad up")
+
+    presses = [(0x11, -1), (0x11, 1), (0x10, -1), (0x10, 1)]
+    for code, value in presses:
+        wiz.codes = gamepad.rows_to_codes([
+            row(3, code, 0, min(0, value), max(0, value), count=2)])
+        wiz.armed = True
+        wiz._tick_buttons()
+
+    recorded = [(b[1], b[3], b[2]) for b in wiz.buttons]
+    assert recorded == [
+        (0x11, -1, "D-pad up"), (0x11, 1, "D-pad down"),
+        (0x10, -1, "D-pad left"), (0x10, 1, "D-pad right"),
+    ]
+    assert all(b[0] == evdev_codes.EV_ABS for b in wiz.buttons)
+
+
+def test_a_claimed_stick_axis_is_never_recorded_as_a_button(tmp_path):
+    from ev3ctl.cli.gamepad import Wizard
+    session = FakeSession()
+    wiz = Wizard(session, str(tmp_path / "m.json"))
+    wiz.session = session
+    wiz.step = gamepad.BUTTONS
+    wiz.armed = True
+    wiz.step_axes[gamepad.LEFT] = ((3, 0), (3, 1))
+    wiz.codes = gamepad.rows_to_codes([row(3, 0, 200, 128, 200, count=5)])
+    wiz._tick_buttons()
+    assert wiz.buttons == []
+
+
+# ---------------------------------------------------------------------
+# The two directions are not the same size
+# ---------------------------------------------------------------------
+
+def test_rest_to_min_and_max_are_recorded_separately():
+    """Measured here: ABS_Y rests at 115 of 0-255, so 115 against 140.
+
+    A consumer dividing both directions by one symmetric figure makes
+    one about 22 percent stronger than the other.
+    """
+    codes = gamepad.rows_to_codes(
+        [row(3, 1, 115, 3, 250, count=40, total=4600)])
+    rest = {(3, 1): {"mean": 115.0, "spread": 1}}
+    document = gamepad.build_mapping(
+        device={}, captured_at="x", assignments={(3, 1): "left_stick"},
+        rest=rest, codes=codes, drivers={(3, 1): STICK}, buttons=[])
+    axis = document["axes"][0]
+    assert axis["rest_to_min"] == 115.0
+    assert axis["rest_to_max"] == 140.0
+    assert axis["rest_to_max"] > axis["rest_to_min"]
+    ratio = axis["rest_to_max"] / axis["rest_to_min"]
+    assert round((ratio - 1) * 100) == 22
+
+
+def test_the_file_says_why_the_two_directions_matter():
+    document = build()
+    assert "normalise each direction against its own measured extent" \
+        in document["asymmetry_note"].lower()
+
+
+def test_a_centred_axis_has_equal_travel_both_ways():
+    codes = gamepad.rows_to_codes([row(3, 0, 128, 3, 250, count=4, total=512)])
+    document = gamepad.build_mapping(
+        device={}, captured_at="x", assignments={(3, 0): "left_stick"},
+        rest={(3, 0): {"mean": 128.0, "spread": 2}}, codes=codes,
+        drivers={(3, 0): STICK}, buttons=[])
+    axis = document["axes"][0]
+    assert axis["rest_to_min"] == 128.0
+    assert axis["rest_to_max"] == 127.0
+
+
+def test_a_lost_window_reset_is_retried_rather_than_stalling(tmp_path):
+    """Disarmed is silent, which is the dangerous part.
+
+    State replies keep arriving and keep being ignored, so a step whose
+    reset reply went missing simply never advances and says nothing
+    about why. Step 6 resets once per button, so a lost reply has
+    fifteen more chances to strand the wizard than it used to.
+    """
+    from ev3ctl.cli import gamepad as command
+    session, wiz = wizard(tmp_path)
+    wiz.session = session
+    wiz.device = DEVICE
+    wiz.enter(gamepad.LEFT)
+    assert wiz.armed is False
+    first = wiz.reset_id
+
+    # Nothing acknowledges it. Before the hatch opens, nothing happens.
+    wiz.tick(wiz.reset_sent_at + 0.5)
+    assert wiz.reset_id == first
+
+    wiz.tick(wiz.reset_sent_at + command.RESET_RETRY_AFTER_S + 0.1)
+    assert wiz.reset_id != first, "a fresh reset should have gone out"
+    assert "reset timed out" in wiz.last_error

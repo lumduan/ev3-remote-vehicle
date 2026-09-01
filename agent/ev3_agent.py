@@ -634,7 +634,6 @@ GAMEPAD_STATE_COLUMNS = (
 _MAC_PHYS = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}", re.IGNORECASE)
 
 _EVENT_HANDLER = re.compile(r"^event\d+$")
-_JS_HANDLER = re.compile(r"^js\d+$")
 
 
 def parse_input_devices(text):
@@ -676,6 +675,7 @@ def _empty_input_block():
         "name": None, "phys": None, "uniq": None, "sysfs": None,
         "bus": None, "vendor": None, "product": None, "version": None,
         "handlers": [], "event": None, "abs_mask": None, "ev_mask": None,
+        "key_mask": None,
     }
 
 
@@ -708,6 +708,8 @@ def _absorb_input_line(block, prefix, body):
             block["abs_mask"] = value.strip() or None
         elif name == "EV":
             block["ev_mask"] = value.strip() or None
+        elif name == "KEY":
+            block["key_mask"] = value.strip() or None
 
 
 def _field_value(body, key):
@@ -745,58 +747,84 @@ def _read_input_devices():
     return parse_input_devices(text)
 
 
+# Capability bitmasks are printed by the kernel as space-separated hex
+# longs, most significant word first, with %lx and no zero padding - so
+# a word can be shorter than its full width, and a bit's position is
+# decided by which word it is in, never by text length. Words are 32
+# bits wide on this brick's ARM kernel. Read on hardware 2026-09-01: the
+# gamepad's KEY mask is ten words, which is 320 bits, enough to carry
+# BTN_SOUTH at 304.
+MASK_WORD_BITS = 32
+
+# BTN_SOUTH. Declared by the gamepad and by neither of the two sibling
+# devices hid-sony creates alongside it, which makes it the thing that
+# tells them apart without depending on any module being loaded.
+BTN_SOUTH = 0x130
+
+
+def mask_has_bit(mask, bit):
+    # type: (str, int) -> bool
+    """Whether one bit is set in a `B: KEY=` style bitmask."""
+    if not mask:
+        return False
+    words = mask.split()
+    index = bit // MASK_WORD_BITS
+    if index >= len(words):
+        return False
+    try:
+        word = int(words[len(words) - 1 - index], 16)
+    except ValueError:
+        return False
+    return bool((word >> (bit % MASK_WORD_BITS)) & 1)
+
+
+def uniq_of(block):
+    # type: (dict) -> str
+    """A block's Uniq, normalised for comparison."""
+    return (block.get("uniq") or "").strip().lower()
+
+
 def _looks_like_the_pad(block, name):
     # type: (dict, str) -> bool
     """Whether this block is the gamepad function of a device.
 
     hid-sony gives one controller three input devices, all sharing the
     controller's Uniq: the pad itself, a touchpad and a motion sensor.
-    Grouping on Uniq alone would therefore call every run ambiguous, so
-    the group has to be narrowed to the gamepad function.
+    Something has to separate them, and it must not be a module that may
+    not be loaded.
 
-    Two cheap signals, either of which is enough, and neither of which
-    needs the bit arithmetic that reading a capability mask would:
+    The device's own KEY mask does it. Read off this brick on
+    2026-09-01, with the pad connected over Bluetooth:
 
-    - the Name matches exactly, which is how the node is found in the
-      first place, or
-    - joydev bound a `js` handler to it. joydev binds joysticks; the
-      touchpad gets a `mouse` handler instead and the motion sensors get
-      neither.
+        Wireless Controller                 KEY=7fdb0000 0 0 0 ...
+        Wireless Controller Touchpad        KEY=2420 0 10000 0 ...
+        Wireless Controller Motion Sensors  (no KEY line at all)
 
-    The limitation is worth stating: if joydev is not loaded **and** the
-    Name differs between transports, a pad on Bluetooth and USB at once
-    would not be grouped, and the ambiguity guard would miss it. Whether
-    the Name does differ is unmeasured - see ROADMAP.md, "Names by
-    transport" - and the second signal is here because it probably does.
+    Only the first declares BTN_SOUTH. An exact Name match is accepted
+    too, because the Name is how the search is seeded in the first
+    place and a controller that declares its buttons differently should
+    still be findable by the name the operator gave.
+
+    An earlier version tested for a `js` handler instead. That was
+    wrong on this hardware: `/dev/input/` holds event0 to event4 and
+    nothing else, and joydev is not in `lsmod`. There is no js node to
+    find, so the test never fired.
     """
     if block.get("name") == name:
         return True
-    for handler in block.get("handlers") or []:
-        if _JS_HANDLER.match(handler):
-            return True
-    return False
+    return mask_has_bit(block.get("key_mask"), BTN_SOUTH)
 
 
 def find_gamepad(name, uniq=None):
     # type: (str, str) -> tuple
-    """The gamepad's event devices, and which field identified them.
+    """The gamepad's event devices, and which fields identified them.
 
-    Identity is the **Uniq** field, which hid-sony sets to the
-    controller's Bluetooth address and which is the same on both
-    transports. The Name is not identity: it is a label, and it can
-    differ between transports for one physical controller.
-
-    That distinction is the whole point of the ambiguity guard. It has
-    to catch the same physical pad arriving over Bluetooth and USB at
-    once, because the two use different HID report layouts and a mapping
-    taken from the wrong one is wrong without ever looking wrong. A
-    guard that compared Names would be looking at the one field that is
-    allowed to differ.
-
-    Name remains the fallback for a device that reports no Uniq at all,
-    and it is always how the search starts, since there is nothing else
-    to seed it with. Which of the two was used is returned so the report
-    can say so rather than leaving the operator to guess.
+    **Identity is the pair (Uniq, Name), not either alone.** Read off
+    this brick on 2026-09-01: one connected controller produces three
+    event devices, and all three carry `Uniq=00:22:68:f2:5c:b6`. Uniq
+    alone would therefore return three devices and call every single run
+    ambiguous. Name alone would not distinguish two controllers of the
+    same model. Together they name one function of one controller.
 
     Returns (candidates, identity_source, identity_value).
     """
@@ -811,25 +839,42 @@ def select_gamepad(blocks, name, uniq=None):
     choosing between what is in it are separate jobs, and only the
     second one has decisions in it worth checking.
     """
-    blocks = [b for b in blocks if b.get("event")]
+    usable = [b for b in blocks if b.get("event")]
+    pads = [b for b in usable if _looks_like_the_pad(b, name)]
+    pads.sort(key=lambda b: b.get("event") or "")
 
     if uniq:
         wanted = uniq.strip().lower()
-        chosen = [b for b in blocks
-                  if (b.get("uniq") or "").strip().lower() == wanted]
-        return chosen, "uniq", uniq
+        return [b for b in pads if uniq_of(b) == wanted], "uniq", uniq
 
-    named = [b for b in blocks if b.get("name") == name]
-    seeds = [b for b in named if (b.get("uniq") or "").strip()]
-    if not seeds:
-        # No Uniq to identify it by. Fall back to the Name, and say so.
-        return named, "name", name
+    named = [b for b in pads if b.get("name") == name]
+    if not named:
+        return [], "name", name
 
-    wanted = seeds[0]["uniq"].strip().lower()
-    same_device = [b for b in blocks
-                   if (b.get("uniq") or "").strip().lower() == wanted
-                   and _looks_like_the_pad(b, name)]
-    return same_device, "uniq", seeds[0]["uniq"]
+    seed = (named[0].get("uniq") or "").strip()
+    if seed:
+        return named, "uniq+name", "{0} / {1}".format(seed, name)
+    return named, "name", name
+
+
+def rival_controllers(candidates):
+    # type: (list) -> list
+    """Candidates that are separate controllers rather than one.
+
+    The ambiguity that matters is **the same Name carried by different
+    Uniq values**: two physical controllers of the same model, where
+    picking either would be picking one at random.
+
+    The same Uniq under different Names is the ordinary case and is not
+    ambiguous at all - it is one controller's three functions, which is
+    what this hardware does every time it connects.
+    """
+    seen = {}
+    for block in candidates:
+        seen.setdefault(uniq_of(block), []).append(block)
+    if len(seen) < 2:
+        return []
+    return candidates
 
 
 def transport_of(bus, phys):
@@ -955,17 +1000,20 @@ class GamepadReader(object):
                 "has not reconnected: press PS".format(id_source, id_value),
                 "no_gamepad",
             )
-        if len(matches) > 1:
+        rivals = rival_controllers(matches)
+        if rivals:
             raise CommandError(
-                "{0} event devices share {1} {2!r}: {3}. That is one pad "
-                "on two transports at once, which use different HID "
-                "report layouts, so a mapping taken from either would be "
-                "a guess about which. Disconnect one and start "
-                "again".format(len(matches), id_source, id_value,
-                               _describe_matches(matches)),
+                "{0} controllers answer to the name {1!r}, with "
+                "different Uniq values: {2}. Those are separate "
+                "controllers, so mapping either would be picking one at "
+                "random. Switch one off, or name the one you want with "
+                "--uniq".format(len(rivals), name,
+                                _describe_matches(rivals)),
                 "ambiguous_gamepad",
             )
 
+        # One identity, so any remaining extras are the same controller
+        # reached more than one way. Lowest event node, deterministically.
         device = matches[0]
         path = os.path.join(INPUT_DIR, device["event"])
         try:
@@ -1017,6 +1065,9 @@ class GamepadReader(object):
             "transport_agreement": agreement,
             "identity_source": id_source,
             "identity_value": id_value,
+            "identity_uniq": device.get("uniq"),
+            "identity_name": device.get("name"),
+            "sibling_nodes": [b.get("event") for b in matches[1:]],
             "absinfo": dict(
                 (str(code), info) for code, info in absinfo.items()),
             "columns": list(GAMEPAD_STATE_COLUMNS),

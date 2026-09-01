@@ -224,6 +224,33 @@ def axes(codes):
     )
 
 
+def press_value(key, entry):
+    """The value that counts as a press, or None if nothing happened.
+
+    Buttons arrive as EV_KEY. **The D-pad on this hardware does not.**
+    Read off the brick on 2026-09-01: hid-sony declares `ABS=3003f`,
+    whose bits 16 and 17 are ABS_HAT0X and ABS_HAT0Y, and it maps the
+    four D-pad directions onto those two hat axes with a declared range
+    of 2. A step listening only for EV_KEY records nothing at all when
+    the D-pad is pressed, and the operator is left pressing harder at a
+    controller that is working perfectly.
+
+    Read from the window's extremes, never from the current value: a
+    press and release inside one 200 ms poll would be back at zero by
+    the time anything looked at it. The sign is kept because up and down
+    are the same hat code with opposite signs.
+    """
+    if key[0] == evdev_codes.EV_KEY:
+        return 1 if entry["max"] >= 1 else None
+    if key[0] != evdev_codes.EV_ABS:
+        return None
+    if entry["max"] > 0:
+        return entry["max"]
+    if entry["min"] < 0:
+        return entry["min"]
+    return None
+
+
 def pressed_keys(codes):
     """EV_KEY codes that have been seen at all in this window."""
     return sorted(
@@ -525,8 +552,11 @@ def matches_evdev_convention(orientation, positive_direction):
 DEADZONE_NOTE = (
     "suggested_deadzone is the measured rest peak-to-peak spread times "
     "{0}. It is a starting point derived from this controller's jitter "
-    "in one sitting, not a tuned value, and it should be checked against "
-    "driver_flat where that is present."
+    "in one sitting, not a tuned value. It can legitimately be 0: a "
+    "still DualShock 4 emits no events at all, so there is no jitter to "
+    "measure. Compare it against driver_flat, which is the driver's own "
+    "hint and read 15 on every stick and trigger axis of this "
+    "controller on 2026-09-01."
 ).format(DEADZONE_MULTIPLE)
 
 ORIENTATION_NOTE = (
@@ -538,6 +568,20 @@ ORIENTATION_NOTE = (
     "axis that deflects further each time is the one named. "
     "hold_deviations carries what both axes did during both holds, so "
     "the decision can be checked rather than taken on trust."
+)
+
+ASYMMETRY_NOTE = (
+    "rest_to_min and rest_to_max are the travel available either side "
+    "of where the stick actually rests, and they are usually not "
+    "equal. Measured on this controller on 2026-09-01: ABS_X rests at "
+    "136 of 0-255, whose midpoint is 127.5, so it has 136 counts of "
+    "travel one way and 119 the other. A consumer that divides both "
+    "directions by one symmetric figure makes one of them about 14 "
+    "percent stronger than the other, and the vehicle will pull to one "
+    "side at full deflection. Normalise each direction against its own "
+    "measured extent. Rest values are per-session: this controller read "
+    "differently on two connections the same day, which is why the "
+    "wizard measures rest every run rather than trusting a stored one."
 )
 
 EVDEV_CONVENTION_NOTE = (
@@ -583,6 +627,7 @@ def build_mapping(device, captured_at, assignments, rest, codes, drivers,
         "captured_at": captured_at,
         "device": device,
         "deadzone_note": DEADZONE_NOTE,
+        "asymmetry_note": ASYMMETRY_NOTE,
         "orientation_note": ORIENTATION_NOTE,
         "evdev_convention_note": EVDEV_CONVENTION_NOTE,
         "axes": axis_records,
@@ -609,6 +654,8 @@ def _axis_record(key, entry, assignments, rest, drivers, orientation,
         "observed_max": entry["max"],
         "rest_mean": _round(rest_entry.get("mean")),
         "rest_spread": rest_spread,
+        "rest_to_min": _travel(rest_entry.get("mean"), low, below=True),
+        "rest_to_max": _travel(rest_entry.get("mean"), high, below=False),
         "suggested_deadzone": suggested_deadzone(rest_spread),
         "range_source": source,
         "driver_min": driver.get("minimum"),
@@ -642,6 +689,8 @@ def _missing_axis_record(code):
         "observed_max": None,
         "rest_mean": None,
         "rest_spread": None,
+        "rest_to_min": None,
+        "rest_to_max": None,
         "suggested_deadzone": None,
         "range_source": "unseen",
         "driver_min": None,
@@ -671,6 +720,14 @@ def _button_record(item):
         "value": value,
         "label": label,
     }
+
+
+def _travel(rest_mean, limit, below):
+    """Travel available on one side of rest, as a positive distance."""
+    if rest_mean is None or limit is None:
+        return None
+    distance = (rest_mean - limit) if below else (limit - rest_mean)
+    return _round(distance)
 
 
 def _round(value):

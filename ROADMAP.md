@@ -102,20 +102,36 @@ part of the fact, not context for it.
 | The Bluetooth radio is **rfkill soft-blocked at boot**, because ConnMan's bluetooth technology reads `Powered = False`. `bluetoothctl power on` fails with `org.bluez.Error.Blocked` until `connmanctl enable bluetooth` clears it, and neither step needs root | `/sys/class/rfkill/rfkill0/soft` went 1 to 0 and `hciconfig hci0` went `DOWN` to `UP RUNNING PSCAN` |
 | A power supply's `scope` is what separates the brick's pack from a peripheral's: the brick reads `System` and offers `voltage_now` but no `capacity`, while a battery inside an attached device reads `Device` | `/sys/class/power_supply/lego-ev3-battery/`, read 2026-09-01 at 7.90 V |
 
-<!-- Held for the first successful run of `ev3ctl gamepad`. These rows
-     are deliberately commented out: nothing below has been read off the
-     hardware, and a fact in the Verified table with no reading behind it
-     is exactly what this document exists to prevent. Uncomment and fill
-     in, with the date, once the wizard has been run.
+| **The controller connects and produces events.** `sony 0005:054C:09CC.0001: input,hidraw0: BLUETOOTH HID v81.00 Gamepad [Wireless Controller] on 00:17:ec:ed:46:29`. **92 events were read in 12 s** shortly after connecting - the first ever read from this pad | `dmesg` and a `python3` reader on `/dev/input/event4`, 2026-09-01. This retires the "not one event has ever been read" claim. Those 92 events were the pad settling, not steady drift: a later 15 s reading produced none |
+| **`/dev/input/event4` opens and reads as `robot`, without root or sudo** | `os.open(path, O_RDONLY \| O_NONBLOCK)` succeeded from an ordinary ssh session, 2026-09-01. Nothing in this project needs to escalate to read the pad |
+| **`struct input_event` is 16 bytes on this brick**, confirmed by running `struct.calcsize("=llHHi")` there | `python3` on the brick, 2026-09-01. Previously reasoned from the ARM word size; now measured. The native `"@llHHi"` is 24 on any 64-bit development host, and parsing 16-byte records as 24-byte ones yields nonsense without raising |
+| **One controller produces three input devices, and all three carry the same `Uniq`** `00:22:68:f2:5c:b6`: `Wireless Controller` on `event4`, `Wireless Controller Touchpad` on `event2`, `Wireless Controller Motion Sensors` on `event3` | `/proc/bus/input/devices`, 2026-09-01. This is why identity is the **pair** (`Uniq`, `Name`): `Uniq` alone returns three devices and would call every run ambiguous |
+| **Only the gamepad declares `BTN_SOUTH`.** Its `B: KEY=7fdb0000 0 0 0 0 0 0 0 0 0` has bit 304 set in word 9; the Touchpad's `KEY=2420 0 10000 0 ...` does not, and the Motion Sensors device has no `KEY` line at all | `/proc/bus/input/devices`, 2026-09-01. This is the test that separates the three, and it needs no module to be loaded |
+| **joydev is not loaded on this brick.** `/dev/input/` holds `event0` to `event4` and `by-path`, and nothing else; `lsmod` has no `joydev` | `ls` and `lsmod`, 2026-09-01. An earlier version of the device discovery used a `js` handler to identify the pad. There is no js node here, so that test could never have fired |
+| **`B: ABS=3003f` decodes to six axes plus one hat**: `ABS_X` 0, `ABS_Y` 1, `ABS_Z` 2, `ABS_RX` 3, `ABS_RY` 4, `ABS_RZ` 5, `ABS_HAT0X` 16, `ABS_HAT0Y` 17 | `/proc/bus/input/devices`, 2026-09-01, decoded by `axis_codes_from_mask` |
+| **`ABS_Z` and `ABS_RZ` are present, so the controller sends the full 78-byte Bluetooth report `0x11` and not the 10-byte `0x01`.** The minimal report carries no analog trigger axes at all, so their presence is what proves which report is in use - and therefore that proportional throttle is possible at all | The same mask. Confirmed with the pad connected and reporting, 2026-09-01 |
+| **The D-pad is a hat, not four buttons.** Bits 16 and 17 are `ABS_HAT0X` and `ABS_HAT0Y`, with a declared range of 2. A step listening only for `EV_KEY` records nothing when the D-pad is pressed | The same mask, 2026-09-01 |
+| **A stick does not rest at the midpoint of its range.** `EVIOCGABS` reports `ABS_X` resting at **136** of 0-255, whose midpoint is 127.5. Its travel is therefore **136 counts one way and 119 the other**, a 14 percent asymmetry; `ABS_RY` rests at 124 | `EVIOCGABS` through the agent, 2026-09-01. A consumer dividing both directions by one symmetric figure makes one that much stronger than the other |
+| **Resting values are not stable between connections and must be measured per run.** `ABS_Y` was seen settling through 115-116 shortly after one connection and read 128 on the next. A rest value in a mapping file describes that session, not the controller | Two readings on 2026-09-01, one from the event stream and one from `EVIOCGABS`. This is why step 1 of the wizard measures rest every run rather than trusting a stored figure |
+| **A resting DualShock 4 can emit no events whatsoever.** 15 s untouched produced **zero** events on every axis, so a measured jitter spread of 0 is a real outcome, and the 3x-jitter deadzone suggestion is then 0 | A reader on `event4`, 2026-09-01. `driver_flat` is the useful number in that case, and the mapping file carries both |
+| **The driver's own deadzone hint is `flat=15`** on all six stick and trigger axes, with `fuzz=0`; the two hat axes report `flat=0` | `EVIOCGABS`, 2026-09-01. Worth comparing against any deadzone derived from measured jitter, which on a still controller can be much smaller |
+| **`EVIOCGABS` works through the agent on this hardware.** Request `0x80184540 + code` returns a 24-byte `input_absinfo`; all six stick and trigger axes report `min=0 max=255`, and the two hats report `min=-1 max=1` | Run through `gamepad_open` against the real brick, 2026-09-01. The hats' declared range of 2 is what excludes a brushed D-pad from the stick steps |
+| **The pad's battery reads 80 percent, `Discharging`**, at `/sys/class/power_supply/sony_controller_battery_00:22:68:f2:5c:b6/` | `cat`, 2026-09-01. The flat battery that blocked Phase 3 in the previous session is no longer the blocker |
+| **The host cannot open the connection; the pad must.** `bluetoothctl connect` fails with `org.bluez.Error.Failed` even when paired and trusted, and one press of PS then connects it | Observed 2026-09-01 while re-pairing. The trust flag is what lets the brick accept the pad's incoming connection with no computer present |
+| **A stale bond presents as a slow white blink.** The pad advertised at RSSI -36 and would not connect until the old bond was removed and it was paired afresh; `trust` then had to be set again, because `remove` discards it | `bluetoothctl` on the brick, 2026-09-01 |
+
+<!-- Still held, for the first successful run of `ev3ctl gamepad`. These
+     rows are deliberately commented out: the wizard has not been run,
+     and a fact in the Verified table with no reading behind it is
+     exactly what this document exists to prevent.
 
 | The axis mapping was captured over ____ and lives in `docs/gamepad-mapping.json` | `uv run ev3ctl gamepad` on ____-__-__ |
 | Which evdev axis each stick and trigger moves: ____ | The same run. Every assignment came from an observation made during a named step, never from a published layout |
-| Which axis of each stick is horizontal, and which polarity means right and up: ____ | The same run, the two directional holds inside steps 2 and 3. `hold_deviations` in the mapping file carries what both axes did during both holds |
+| Which axis of each stick is horizontal, and which polarity means right and up: ____ | The same run, the two directional holds inside steps 2 and 3 |
 | This pad ____ the usual evdev polarity convention (X up to the right, Y up downward) | The same run. Recorded as a data point; nothing in the capture consulted it |
 | The pad's Name over USB is ____, against `Wireless Controller` over Bluetooth | `/proc/bus/input/devices` with the pad connected each way. See "Names by transport" |
-| Stick centres and resting drift, per axis: ____ | The same run, step 1. Measured over 3 s with both hands off |
-| L2 and R2 report ____ intermediate values, so proportional throttle is ____ | The same run, steps 4 and 5. An analog trigger delivered as a digital button would show only its two extremes |
-| The driver's own `flat` deadzone hint, per axis: ____, against the measured 3x-jitter suggestion of ____ | `EVIOCGABS` through the agent, reported in the same file |
+| L2 and R2 report ____ intermediate values, so proportional throttle is ____ | The same run, steps 4 and 5 |
+| The driver's own `flat` deadzone hint, per axis: ____ | `EVIOCGABS` through the agent, reported in the same file |
 -->
 
 **The input probe aborted, and the cause is a flat battery.** With the
@@ -333,7 +349,7 @@ that the radio belongs to the gamepad is the actual design.
 | --- | --- | --- |
 | **Round-trip time over Bluetooth PAN**, typical and maximum | **Blocked, not merely unmeasured.** This Mac appears to provide no Bluetooth PAN client at all - see "Bluetooth PAN on macOS" below. Until a second transport exists, `drive` is transport-independent by construction and not by demonstration | **Phase 2a, acceptance item 8**, which needs either a different host or a different second transport |
 | Whether the brick itself can offer Bluetooth PAN (NAP) | Not tested. The brick was off the USB bus when the question came up, and with no client on the Mac there was nothing to test against | Only worth answering if a PAN client is found |
-| The DualShock 4's full axis and button mapping, and its stick centre and resting drift | **No longer blocked on software, and no longer blocked on a charge alone: it needs one operator run.** `ev3ctl gamepad` exists and captures it, and its arithmetic is unit-tested off the brick, but **the wizard has never been run against hardware** and not one event has ever been read from the pad. Which evdev code each physical control produces, and what a centred stick actually reads, are still unmeasured | **Phase 3**, acceptance items 3 and 4. One run of `uv run ev3ctl gamepad` with the controller charged, which writes `docs/gamepad-mapping.json` and fills in the block held for it above |
+| The DualShock 4's full axis and button mapping, and its stick centre and resting drift | **Blocked on nothing but one operator run.** The pad connects, events have been read from it, and its battery is at 80 percent; `ev3ctl gamepad` exists and its arithmetic is unit-tested off the brick. What has not happened is a person holding the controller and working through the eight steps, so which evdev code each physical control produces is still unrecorded - `ABS_Y`'s resting value is the only axis figure measured so far | **Phase 3**, acceptance items 3 and 4. One run of `uv run ev3ctl gamepad`, which writes `docs/gamepad-mapping.json` and fills in the block still held above |
 | That the dashboard's keys drive a motor, and that a device unplugged mid-session empties its row | A motor has now been commanded over the real link and turned, and `ev3ctl scan` shows both motors in the right rows. What has not been exercised on hardware is `ev3ctl live` itself: its key handling, its rescan-on-replug, and its teardown | **Phase 2**, acceptance items 4, 5 and 8 |
 | Sensor behaviour: `decimals`, `units`, `modes`, and whether mode cycling works | No sensor is attached to this brick | **Phase 2**, acceptance item 6 |
 | Why the brick dropped off the USB bus mid-session on 2026-08-29 | The `en7` interface vanished and the interface list returned byte-identical to the pre-plug baseline, while work was in progress. Cause unknown: cable, power, or an idle shutdown | **Phase 0**, next time the brick is connected. If it recurs, it matters a great deal, because a link that dies on its own is the latch test happening at random |
@@ -776,9 +792,15 @@ Three decisions in it are worth knowing before reading the code:
   the search, matched on equality and never as a substring, because
   hid-sony's three devices for one controller all contain it. All three
   also share the `Uniq`, so the group is narrowed to the gamepad
-  function by exact Name or by joydev having bound a `js` handler. Name
-  is the fallback when `Uniq` is empty, and the report says which was
-  used.
+  function by the one field that separates them: only the gamepad
+  declares `BTN_SOUTH` in its `B: KEY=` mask, verified on hardware
+  2026-09-01. Name is the fallback when `Uniq` is empty, and the report
+  says which was used.
+- **The ambiguity guard fires on one condition only:** the same exact
+  Name carried by *different* `Uniq` values, which is two separate
+  controllers of the same model, where mapping either would be picking
+  one at random. The same `Uniq` under different Names is the ordinary
+  case - one controller's three functions - and is accepted.
 - **"80 percent of the range" is measured against the driver's range**,
   read per axis with the `EVIOCGABS` ioctl, not against the range
   observed so far. Against an observed range the test is self-referential
@@ -832,12 +854,12 @@ have sufficed and `Uniq` is merely the better key. If they differ, the
 Name-based guard would have missed the case outright, and this row is
 the evidence for why identity moved.
 
-One limitation follows from how the group is narrowed. A device is taken
-to be the gamepad function of a controller if its Name matches exactly
-**or** joydev has bound it a `js` handler. If joydev is not loaded *and*
-the Names differ, the two transports would not be grouped and the guard
-would miss them. Whether joydev is loaded on this brick is also
-unverified.
+The group is narrowed by the device's own `KEY` mask: only the gamepad
+function declares `BTN_SOUTH`. That was chosen after an earlier version
+leaned on joydev having bound a `js` handler, which turned out to be
+unreachable - `lsmod` has no joydev on this brick and `/dev/input/`
+holds no js node, so the test could never have fired. The mask is read
+from the device itself and depends on no module being loaded.
 
 The arithmetic - the parser, the advance gates, the rest statistics, the
 16-byte `input_event` decode and the analog-versus-digital trigger test -

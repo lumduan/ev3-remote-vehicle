@@ -47,6 +47,13 @@ POLL_RETRY_AFTER_S = 2.0
 # than the poll because each attempt reads /proc and probes 64 axes.
 OPEN_RETRY_AFTER_S = 1.0
 
+# A window reset that never comes back would leave the step disarmed
+# for good, and disarmed is silent: state replies keep arriving and keep
+# being ignored, so the step simply never advances and nothing says why.
+# Step 6 now resets once per button, so there are fifteen more chances
+# for a lost reply to strand the wizard than there used to be.
+RESET_RETRY_AFTER_S = 2.0
+
 DEFAULT_OUTPUT = os.path.join("docs", "gamepad-mapping.json")
 
 CONNECT = gamepad.CONNECT
@@ -98,6 +105,7 @@ class Wizard(object):
         # before the window boundary is ever judged.
         self.armed = False
         self.reset_id = None
+        self.reset_sent_at = 0.0
 
         self.codes = {}
         self.total_events = 0
@@ -244,8 +252,7 @@ class Wizard(object):
         self.wrong_stick = False
         self.codes = {}
         if step in RESETTING_STEPS:
-            self.reset_id = self.track(
-                self.session.send_gamepad_reset_window(), "reset")
+            self.rearm_window()
         if step == SUMMARY:
             self._write_mapping()
 
@@ -301,7 +308,12 @@ class Wizard(object):
         if self.step == CONNECT:
             self._tick_connect(now)
             return
-        if not self.armed or not self.device:
+        if not self.device:
+            return
+        if not self.armed:
+            if now - self.reset_sent_at > RESET_RETRY_AFTER_S:
+                self.note("window reset timed out, retrying")
+                self.rearm_window()
             return
         if self.step == REST:
             self._tick_rest(now)
@@ -399,10 +411,7 @@ class Wizard(object):
         self.phase = phase
         self.hold_since = None
         self.hold_outcome = None
-        self.armed = False
-        self.codes = {}
-        self.reset_id = self.track(
-            self.session.send_gamepad_reset_window(), "reset")
+        self.rearm_window()
 
     def _tick_hold(self, now):
         pair = self.step_axes.get(self.step, ())
@@ -497,32 +506,43 @@ class Wizard(object):
     def _tick_buttons(self):
         """Record whatever arrives while a label is being prompted.
 
-        Both event types are accepted. A D-pad on this pad is expected
-        to arrive as hat axis movement rather than as EV_KEY presses, so
-        insisting on EV_KEY would record nothing for four of the
-        fifteen prompts and look like a broken controller.
+        Both event types are accepted, and that is not defensive
+        programming: on this hardware the D-pad genuinely is not
+        EV_KEY. hid-sony declares ABS_HAT0X and ABS_HAT0Y and maps the
+        four directions onto those two hat axes, so a step listening
+        only for EV_KEY would record nothing for four of the fifteen
+        prompts and look like a broken controller.
+
+        Axes a stick or trigger step already claimed are ignored, so a
+        nudged stick cannot be recorded as a button.
         """
         if self.button_index >= len(gamepad.BUTTON_PROMPTS):
             return
         label = gamepad.BUTTON_PROMPTS[self.button_index]
-        already = set((item[0], item[1], item[3]) for item in self.buttons)
+        claimed = self.claimed()
         for key, entry in sorted(self.codes.items()):
-            if entry["count"] == 0:
+            if entry["count"] == 0 or key in claimed:
                 continue
-            value = entry["latest"]
-            if key[0] == evdev_codes.EV_KEY:
-                if value == 0:
-                    continue
-            elif key[0] == evdev_codes.EV_ABS:
-                if value == 0 or key in self.claimed():
-                    continue
-            else:
-                continue
-            if (key[0], key[1], value) in already:
+            value = gamepad.press_value(key, entry)
+            if value is None:
                 continue
             self.buttons.append((key[0], key[1], label, value))
             self.button_index += 1
+            # Start a fresh window for the next prompt. Without this the
+            # hat axes accumulate: up leaves -1 in the window's minimum
+            # and down leaves +1 in its maximum, so the third and fourth
+            # D-pad prompts would find nothing new on either axis and
+            # the step would stall with two directions unrecorded.
+            self.rearm_window()
             return
+
+    def rearm_window(self):
+        """Reset the accumulated window and wait for it to take effect."""
+        self.armed = False
+        self.codes = {}
+        self.reset_sent_at = time.monotonic()
+        self.reset_id = self.track(
+            self.session.send_gamepad_reset_window(), "reset")
 
     def button_prompt(self):
         if self.button_index >= len(gamepad.BUTTON_PROMPTS):
