@@ -735,10 +735,13 @@ def _report(wizard):
     source = device.get("identity_source")
     value = device.get("identity_value")
     console.print()
-    if source == "uniq":
+    if source == "uniq+name":
+        console.print("[ok]Identified by[/ok] Uniq + Name " + str(value)
+                      + "  [dim]the pair: Uniq is the controller, Name "
+                      "is which of its three devices[/dim]")
+    elif source == "uniq":
         console.print("[ok]Identified by[/ok] Uniq " + str(value)
-                      + "  [dim]the controller's own address, the same "
-                      "on either transport[/dim]")
+                      + "  [dim]given on the command line[/dim]")
     elif source == "name":
         console.print("[warn]Identified by[/warn] Name " + repr(value)
                       + "  [dim]this device reports no Uniq, so the "

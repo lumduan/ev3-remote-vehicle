@@ -468,8 +468,10 @@ def _identity_markup(device):
     """
     source = device.get("identity_source")
     value = device.get("identity_value")
+    if source == "uniq+name":
+        return "[ok]Uniq + Name[/ok] " + text(value)
     if source == "uniq":
-        return "[ok]Uniq[/ok] " + text(value)
+        return "[ok]Uniq[/ok] " + text(value) + "  [dim]given[/dim]"
     if source == "name":
         return ("[warn]Name[/warn] " + text(value)
                 + "  [dim]no Uniq reported; fallback[/dim]")

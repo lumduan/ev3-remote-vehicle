@@ -1368,3 +1368,19 @@ def test_a_lost_window_reset_is_retried_rather_than_stalling(tmp_path):
     wiz.tick(wiz.reset_sent_at + command.RESET_RETRY_AFTER_S + 0.1)
     assert wiz.reset_id != first, "a fresh reset should have gone out"
     assert "reset timed out" in wiz.last_error
+
+
+def test_every_identity_source_the_agent_can_return_is_rendered():
+    """The header said "not reported" while identity worked perfectly.
+
+    The agent returns "uniq+name" for the ordinary case; the renderer
+    only knew "uniq" and "name", so the common path fell through to the
+    unknown branch. Caught on hardware, mid-run.
+    """
+    from ev3ctl import ui
+    for source in ("uniq+name", "uniq", "name"):
+        markup = ui._identity_markup(
+            {"identity_source": source, "identity_value": "v"})
+        assert "not reported" not in markup, source
+        assert "v" in markup
+    assert "not reported" in ui._identity_markup({})
