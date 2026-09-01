@@ -214,6 +214,11 @@ def read_rest(fd, code):
 # The import is guarded, so a brick without ev3dev2 falls back to
 # printing rather than refusing to drive. Driving is the point; the
 # screen is a convenience.
+#
+# Confirmed by the operator on 2026-09-01: launched from Brickman's File
+# Browser, the screens are visible and readable. That could not be
+# checked from a development machine, because the VT switch Brickman
+# performs needs root.
 # ---------------------------------------------------------------------
 
 try:
