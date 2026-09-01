@@ -9,8 +9,9 @@ proprietary firmware.
 
 ## Status
 
-**Phase 2 of 5.** The vehicle does not exist. There is no control loop,
-no gamepad pairing, and no robot.
+**Phase 3 of 5.** The vehicle does not exist. There is no control loop
+and no robot. The gamepad is paired and trusted, and `hid-sony` binds
+it, but not one event has been read from it yet.
 
 What does exist is `ev3ctl`, the diagnostic tool: it connects to the
 brick over SSH, shows every motor and sensor live at 5 Hz, and drives
@@ -157,8 +158,9 @@ uv run ev3ctl live     # 5 Hz dashboard with interactive motor control
 uv run ev3ctl          # same as live
 ```
 
-Both take `--host` (default `robot@ev3dev.local`), `--agent` to override
-the agent source, `--timeout`, and `--no-multiplex`.
+Every subcommand takes `--host` (default `robot@ev3dev.local`),
+`--agent` to override the agent source, `--timeout`, and
+`--no-multiplex`.
 
 The dashboard's keys:
 
@@ -233,6 +235,51 @@ Opposing keys cancel. `a` or `d` alone counter-rotates the motors and
 spins the vehicle in place. `w` and `a` together pivot about the stopped
 wheel rather than curving — see Phase 2a in [ROADMAP.md](ROADMAP.md) for
 why that falls out of the mixing.
+
+## Mapping the gamepad
+
+`ev3ctl gamepad` is a guided wizard that works out which evdev code each
+control on the controller produces, and writes the answer to
+`docs/gamepad-mapping.json`.
+
+```bash
+uv run ev3ctl gamepad                     # the whole wizard
+uv run ev3ctl gamepad --output /tmp/m.json
+```
+
+It has eight steps and advances on its own as each is satisfied. Every
+step shows what to do, every code it has seen so far with its current
+value and range, and how close the advance condition is to being met -
+so a step that will not advance says which axis has not moved far
+enough, rather than only that it is waiting.
+
+| Key | Action |
+| --- | --- |
+| `s` | skip this step, leaving its axes unassigned |
+| `r` | redo this step, forgetting what it found |
+| `q` | abort; the same teardown as finishing |
+
+Press PS to wake the controller when step 0 asks for it. Steps 2 and 3
+want a full circular sweep of one stick; steps 4 and 5 want a trigger
+squeezed all the way in and released, three times. Step 6 names each
+button in turn and ends when you press `s`.
+
+**Nothing in the output file is taken from a published controller
+layout.** Every assignment comes from an observation made during a named
+step. An axis no step ever claimed is written with a null control rather
+than a plausible guess, and the file says in as many words that the
+suggested deadzone is three times the measured jitter from one sitting
+and not a tuned value.
+
+Two things worth knowing before the first run:
+
+- **If the pad is on USB and Bluetooth at once, the wizard refuses to
+  start.** The two transports use different HID report layouts, so a
+  mapping captured from the wrong one would be wrong without ever
+  looking wrong. Unplug the cable and press PS.
+- **Which of a stick's two axes is horizontal is left unmeasured.** A
+  circular sweep moves both through their whole range, so it cannot tell
+  them apart, and guessing is the one thing this tool exists to avoid.
 
 ### Two things that surprise people
 
@@ -319,8 +366,13 @@ Bluetooth was never the development link here.
 | `src/ev3ctl/cli/` | CPython 3.12, macOS | One module per subcommand. |
 | `src/ev3ctl/mixer.py` | CPython 3.12, macOS | Held keys to two motor duties. Pure functions, no I/O. |
 | `src/ev3ctl/link.py` | CPython 3.12, macOS | The SSH transport and the only module that knows the wire. |
+| `src/ev3ctl/gamepad.py` | CPython 3.12, macOS | The gamepad wizard's arithmetic: advance gates, rest statistics, the mapping document. Pure functions, no I/O. |
+| `src/ev3ctl/evdev_codes.py` | CPython 3.12, macOS | evdev type and code names, transcribed from the v4.14 kernel header. Names only, never a controller layout. |
 | `agent/` | CPython 3.5, ev3dev | Code that runs **on the brick**. Standard library only. Copied there, never imported by `src/`. |
 | `agent/ev3_agent.py` | CPython 3.5, ev3dev | All hardware access, and the watchdog. One file, no dependencies. |
+| `agent/battery_report.py` | CPython 3.5, ev3dev | Standalone battery diagnostic. Copied by hand, not part of the protocol. |
+| `tests/` | CPython 3.12, macOS | Tests for the pure host logic, and for the brick's parser read as text. |
+| `docs/gamepad-mapping.json` | — | Written by `ev3ctl gamepad`. Absent until the wizard has been run. |
 | `pyproject.toml` | — | `uv` project definition. Host dependencies only. |
 | `README.md` | — | This file. |
 | `CLAUDE.md` | — | Working rules for this repository. |

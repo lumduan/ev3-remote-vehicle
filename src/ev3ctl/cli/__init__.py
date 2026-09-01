@@ -82,6 +82,38 @@ def build_parser():
                     "control. This is what runs when no command is given.",
     )
     _add_drive(subparsers, common)
+    _add_gamepad(subparsers, common)
+    return parser
+
+
+def _add_gamepad(subparsers, common):
+    # Registered inline, with its default written out rather than read
+    # off the command module, so that --help does not have to import the
+    # wizard and pay for rich to answer a question about usage.
+    parser = subparsers.add_parser(
+        "gamepad", parents=[common],
+        help="step-by-step wizard that maps the gamepad's axes",
+        description=(
+            "Guided capture of the gamepad's evdev axis and button "
+            "mapping. Each step shows what to do and what the "
+            "controller is doing about it, and advances on its own when "
+            "it is satisfied. Nothing is taken from a published "
+            "controller layout: every assignment in the file comes from "
+            "an observation made during a step."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--output", metavar="PATH",
+        help="where to write the mapping "
+             "(default: docs/gamepad-mapping.json in the repository)",
+    )
+    parser.add_argument(
+        "--name", metavar="NAME",
+        help="exact input device name to match. Exact, never a "
+             "substring: hid-sony creates three devices for one pad "
+             "(default: Wireless Controller)",
+    )
     return parser
 
 
@@ -148,6 +180,7 @@ def main(argv=None):
     # Imported here rather than at module scope so that --help and
     # --version stay instant and do not pay for rich's import.
     from . import drive as drive_command
+    from . import gamepad as gamepad_command
     from . import live as live_command
     from . import scan as scan_command
 
@@ -155,6 +188,7 @@ def main(argv=None):
         "scan": scan_command.run,
         "live": live_command.run,
         "drive": drive_command.run,
+        "gamepad": gamepad_command.run,
     }
     runner = runners[command]
 

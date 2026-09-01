@@ -102,6 +102,19 @@ part of the fact, not context for it.
 | The Bluetooth radio is **rfkill soft-blocked at boot**, because ConnMan's bluetooth technology reads `Powered = False`. `bluetoothctl power on` fails with `org.bluez.Error.Blocked` until `connmanctl enable bluetooth` clears it, and neither step needs root | `/sys/class/rfkill/rfkill0/soft` went 1 to 0 and `hciconfig hci0` went `DOWN` to `UP RUNNING PSCAN` |
 | A power supply's `scope` is what separates the brick's pack from a peripheral's: the brick reads `System` and offers `voltage_now` but no `capacity`, while a battery inside an attached device reads `Device` | `/sys/class/power_supply/lego-ev3-battery/`, read 2026-09-01 at 7.90 V |
 
+<!-- Held for the first successful run of `ev3ctl gamepad`. These rows
+     are deliberately commented out: nothing below has been read off the
+     hardware, and a fact in the Verified table with no reading behind it
+     is exactly what this document exists to prevent. Uncomment and fill
+     in, with the date, once the wizard has been run.
+
+| The axis mapping was captured over ____ and lives in `docs/gamepad-mapping.json` | `uv run ev3ctl gamepad` on ____-__-__ |
+| Which evdev axis each stick and trigger moves: ____ | The same run. Every assignment came from an observation made during a named step, never from a published layout |
+| Stick centres and resting drift, per axis: ____ | The same run, step 1. Measured over 3 s with both hands off |
+| L2 and R2 report ____ intermediate values, so proportional throttle is ____ | The same run, steps 4 and 5. An analog trigger delivered as a digital button would show only its two extremes |
+| The driver's own `flat` deadzone hint, per axis: ____, against the measured 3x-jitter suggestion of ____ | `EVIOCGABS` through the agent, reported in the same file |
+-->
+
 **The input probe aborted, and the cause is a flat battery.** With the
 gamepad paired and trusted, the operator pressed PS once. It connected on
 its own, the light bar lit solid white and then turned blue, and a few
@@ -317,7 +330,7 @@ that the radio belongs to the gamepad is the actual design.
 | --- | --- | --- |
 | **Round-trip time over Bluetooth PAN**, typical and maximum | **Blocked, not merely unmeasured.** This Mac appears to provide no Bluetooth PAN client at all - see "Bluetooth PAN on macOS" below. Until a second transport exists, `drive` is transport-independent by construction and not by demonstration | **Phase 2a, acceptance item 8**, which needs either a different host or a different second transport |
 | Whether the brick itself can offer Bluetooth PAN (NAP) | Not tested. The brick was off the USB bus when the question came up, and with no client on the Mac there was nothing to test against | Only worth answering if a PAN client is found |
-| The DualShock 4's full axis and button mapping, and its stick centre and resting drift | **Blocked on a flat battery, not on software.** The controller pairs, `hid-sony` binds, and `B: ABS=3003f` says which axes exist - but it powers itself off within seconds, so not one event has ever been read from `/dev/input/event4`. Which evdev code each physical control produces, and what a centred stick actually reads, are still unmeasured | **Phase 3**, acceptance items 3 and 4, once the controller has been charged from a mains charger |
+| The DualShock 4's full axis and button mapping, and its stick centre and resting drift | **No longer blocked on software, and no longer blocked on a charge alone: it needs one operator run.** `ev3ctl gamepad` exists and captures it, and its arithmetic is unit-tested off the brick, but **the wizard has never been run against hardware** and not one event has ever been read from the pad. Which evdev code each physical control produces, and what a centred stick actually reads, are still unmeasured | **Phase 3**, acceptance items 3 and 4. One run of `uv run ev3ctl gamepad` with the controller charged, which writes `docs/gamepad-mapping.json` and fills in the block held for it above |
 | That the dashboard's keys drive a motor, and that a device unplugged mid-session empties its row | A motor has now been commanded over the real link and turned, and `ev3ctl scan` shows both motors in the right rows. What has not been exercised on hardware is `ev3ctl live` itself: its key handling, its rescan-on-replug, and its teardown | **Phase 2**, acceptance items 4, 5 and 8 |
 | Sensor behaviour: `decimals`, `units`, `modes`, and whether mode cycling works | No sensor is attached to this brick | **Phase 2**, acceptance item 6 |
 | Why the brick dropped off the USB bus mid-session on 2026-08-29 | The `en7` interface vanished and the interface list returned byte-identical to the pre-plug baseline, while work was in progress. Cause unknown: cable, power, or an idle shutdown | **Phase 0**, next time the brick is connected. If it recurs, it matters a great deal, because a link that dies on its own is the latch test happening at random |
@@ -712,9 +725,12 @@ is committed.
 2. The driver bound to it is recorded. **Add it to the Verified table.**
    **Done 2026-09-01.** `hid-sony`, quoted in "Verified: the gamepad".
 3. Every stick, trigger, D-pad direction and button produces an event,
-   and the event code for each is written down.
+   and the event code for each is written down. **The instrument for
+   this is written: `ev3ctl gamepad`, a guided wizard. It has not been
+   run.** See "How the mapping gets captured" below.
 4. Stick centre values and resting drift are measured, not assumed. A
-   deadzone that is guessed is a deadzone that is wrong.
+   deadzone that is guessed is a deadzone that is wrong. **Step 1 of the
+   wizard measures both; nothing is measured until it is run.**
 5. Power the brick off and on. The controller reconnects without being
    re-paired.
 6. Switch the controller off mid-session. The brick notices, and does
@@ -733,6 +749,45 @@ nothing else. The mapping in item 3 is deliberately not guessed from a
 table on the internet in the meantime: `B: ABS=3003f` says which axes
 exist, and that is a different claim from knowing which one a given
 stick moves.
+
+What has changed is that the *instrument* now exists, so the phase no
+longer waits on writing one. Nothing in the paragraph above has been
+weakened: the wizard has not been run, and until it has, the Verified
+block held for it stays commented out.
+
+### How the mapping gets captured
+
+`uv run ev3ctl gamepad` walks the operator through eight steps and
+advances on its own as each is satisfied, showing live values throughout
+rather than reporting at the end. It writes `docs/gamepad-mapping.json`.
+
+Three decisions in it are worth knowing before reading the code:
+
+- **The pad is matched on its exact name, never a substring.** hid-sony
+  creates three input devices for one controller, so a substring test
+  matches all three on every run, and the guard that refuses to proceed
+  on an ambiguous match would fire every time. With exact matching, a
+  second match means the pad is on Bluetooth and USB at once - which use
+  different HID report layouts - and the wizard then refuses, because a
+  mapping taken from the wrong one is wrong without looking wrong.
+- **"80 percent of the range" is measured against the driver's range**,
+  read per axis with the `EVIOCGABS` ioctl, not against the range
+  observed so far. Against an observed range the test is self-referential
+  early in a step and a twitch satisfies it. The driver's declared range
+  also excludes the D-pad from the stick steps on its own evidence: a hat
+  declares a range of 2, which is too coarse to be a stick, so a brushed
+  D-pad cannot be named as one.
+- **Which of a stick's two axes is horizontal is written as null.** A
+  full circular sweep moves both axes through their whole range and
+  therefore cannot distinguish them. That is left unmeasured rather than
+  filled in from a published layout, and it is the one thing a later
+  phase still has to measure before a mixer can use the file.
+
+The arithmetic - the parser, the advance gates, the rest statistics, the
+16-byte `input_event` decode and the analog-versus-digital trigger test -
+is unit-tested off the brick in `tests/test_gamepad.py`, because a wrong
+comparison in a gate does not crash; it produces a step that waits
+forever while the operator wonders which of the two of them is broken.
 
 ## Phase 4: Non-blocking control loop
 

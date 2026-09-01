@@ -99,6 +99,51 @@ class Session(object):
         return self.link.request(
             "set_stop_action", address=address, value=value)
 
+    # -- the gamepad --------------------------------------------------
+    #
+    # Opening, resetting and closing are blocking: each happens once at
+    # a step boundary, where the wizard has nothing else to do and the
+    # answer decides what it shows next. Only the state poll is sent
+    # without waiting, because that one runs five times a second.
+
+    def send_gamepad_open(self, name=None):
+        """Ask for the pad without waiting.
+
+        Step 0 of the wizard retries this until the operator presses PS,
+        so it cannot be the blocking form: a `request` that timed out
+        would freeze the display for eight seconds at exactly the moment
+        the operator is watching it for a sign of life.
+        """
+        fields = {"name": name} if name else {}
+        return self.link.send("gamepad_open", **fields)
+
+    def send_gamepad_reset_window(self):
+        """Clear the window without waiting.
+
+        The reset happens on the brick at a definite instant, and
+        everything before it is discarded there. The wizard ignores
+        state replies until this one's response lands, which is what
+        makes a step's window start exactly here.
+        """
+        return self.link.send("gamepad_reset_window")
+
+    def gamepad_close(self):
+        """Stop the reader and close the device. Never raises.
+
+        Called from the wizard's teardown on every path, including
+        abort, so it swallows everything. The agent closes the device in
+        its own finally as well; this is the tidy case, that is the
+        backstop for the case where this process is already gone.
+        """
+        try:
+            return self.link.request(
+                "gamepad_close", timeout=TEARDOWN_TIMEOUT_S)
+        except Exception:
+            return {}
+
+    def send_gamepad_state(self):
+        return self.link.send("gamepad_state")
+
     # -- the same commands, without waiting ---------------------------
     #
     # The live loop uses these. A keypress that blocked until the brick

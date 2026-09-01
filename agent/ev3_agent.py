@@ -22,9 +22,14 @@ stop a motor over a cable that has been pulled. Only this side can, so
 only this side is trusted to.
 """
 
+import errno
+import fcntl
 import glob
 import json
 import os
+import re
+import select
+import struct
 import sys
 import threading
 import time
@@ -49,7 +54,9 @@ MAX_SENSOR_VALUES = 32
 
 COMMANDS = (
     "hello", "scan", "poll", "motor_run", "drive", "motor_stop",
-    "motor_reset", "set_stop_action", "sensor_mode", "stop_all", "bye",
+    "motor_reset", "set_stop_action", "sensor_mode", "stop_all",
+    "gamepad_open", "gamepad_state", "gamepad_reset_window",
+    "gamepad_close", "bye",
 )
 
 # The values the tacho-motor driver accepts for stop_action. Read off
@@ -559,6 +566,578 @@ class MotorControl(object):
 
 
 # ---------------------------------------------------------------------
+# The gamepad
+#
+# Nothing here touches a motor, and nothing here may block the command
+# loop above. A gamepad produces events far faster than a 5 Hz poll can
+# collect them and much faster than this link can carry them, so a
+# reader thread accumulates into counters and the host asks for the
+# counters. Individual events are never queued and never sent.
+# ---------------------------------------------------------------------
+
+INPUT_DEVICES_PATH = "/proc/bus/input/devices"
+INPUT_DIR = "/dev/input"
+
+GAMEPAD_NAME = "Wireless Controller"
+
+# struct input_event on a 32-bit ARM kernel: struct timeval (two 32-bit
+# longs), then __u16 type, __u16 code, __s32 value. Sixteen bytes.
+#
+# "=" pins standard sizes, which is the whole point. The native "@llHHi"
+# is 24 bytes on a 64-bit host because time_t is 8 bytes there, and 24 is
+# the number that gets assumed by anyone who tried this on a laptop
+# first. Parsing 16-byte records as 24-byte ones does not raise; it
+# silently yields nonsense.
+EVENT_STRUCT = struct.Struct("=llHHi")
+
+# struct input_absinfo: six __s32 - value, minimum, maximum, fuzz, flat,
+# resolution.
+ABSINFO_STRUCT = struct.Struct("=6i")
+
+# EVIOCGABS(code) = _IOR('E', 0x40 + code, struct input_absinfo), which
+# expands to (2 << 30) | (24 << 16) | (ord('E') << 8) | (0x40 + code).
+# The code lands in the low byte, so adding it to the base is the same
+# as recomputing the macro. Python 3.5's fcntl.ioctl takes the request
+# as an unsigned int, so this value needs no sign conversion.
+EVIOCGABS_BASE = 0x80184540
+ABS_CODE_MAX = 0x3F
+
+EV_SYN = 0x00
+EV_KEY = 0x01
+EV_ABS = 0x03
+
+# Event types worth accumulating. EV_SYN is a frame marker carrying no
+# value, and EV_MSC on this driver is a scancode echo of a button that
+# is already reported as EV_KEY; both would only add rows.
+GAMEPAD_TYPES = (EV_KEY, EV_ABS)
+
+GAMEPAD_READ_TICK_S = 0.05
+GAMEPAD_READ_CHUNK = 64 * EVENT_STRUCT.size
+GAMEPAD_JOIN_TIMEOUT_S = 1.0
+
+# Distinct values remembered per code, so that a trigger reporting only
+# its two extremes can be told from one sweeping through them. Bounded
+# because this brick has 64 MB of RAM and an axis could otherwise
+# accumulate a set as large as its range.
+GAMEPAD_DISTINCT_CAP = 64
+
+# The column order of one row from gamepad_state. Returned by
+# gamepad_open as well, so that the host can check the two sides agree
+# rather than silently reading the wrong field.
+GAMEPAD_STATE_COLUMNS = (
+    "type", "code", "latest", "min", "max", "count", "sum",
+    "distinct", "interior", "overflow",
+)
+
+# Six colon-separated hex pairs: a Bluetooth adapter address. Anchored
+# at the start only, because hid-sony appends a suffix on some kernels.
+_MAC_PHYS = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}", re.IGNORECASE)
+
+_EVENT_HANDLER = re.compile(r"^event\d+$")
+
+
+def parse_input_devices(text):
+    # type: (str) -> list
+    """Every block of /proc/bus/input/devices, as a list of dicts.
+
+    The format comes from input_devices_seq_show in
+    drivers/input/input.c: one block per device, blocks separated by a
+    blank line, every line prefixed by a letter and a colon, and
+    Handlers space separated with a trailing space.
+
+    A line that does not fit is skipped rather than raising. This file
+    is read while devices are appearing and disappearing, and one
+    malformed block must not cost the caller the device it wanted.
+    """
+    blocks = []
+    current = _empty_input_block()
+    seen = False
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            if seen:
+                blocks.append(current)
+            current = _empty_input_block()
+            seen = False
+            continue
+        if len(line) < 2 or line[1] != ":":
+            continue
+        seen = True
+        _absorb_input_line(current, line[0], line[2:].strip())
+    if seen:
+        blocks.append(current)
+    return blocks
+
+
+def _empty_input_block():
+    # type: () -> dict
+    return {
+        "name": None, "phys": None, "uniq": None, "sysfs": None,
+        "bus": None, "vendor": None, "product": None, "version": None,
+        "handlers": [], "event": None, "abs_mask": None, "ev_mask": None,
+    }
+
+
+def _absorb_input_line(block, prefix, body):
+    # type: (dict, str, str) -> None
+    if prefix == "I":
+        for field in body.split():
+            key, _, value = field.partition("=")
+            if key.lower() in ("bus", "vendor", "product", "version"):
+                block[key.lower()] = _parse_hex(value)
+    elif prefix == "N":
+        block["name"] = _unquote(_field_value(body, "Name"))
+    elif prefix == "P":
+        block["phys"] = _field_value(body, "Phys")
+    elif prefix == "U":
+        block["uniq"] = _field_value(body, "Uniq")
+    elif prefix == "S":
+        block["sysfs"] = _field_value(body, "Sysfs")
+    elif prefix == "H":
+        handlers = (_field_value(body, "Handlers") or "").split()
+        block["handlers"] = handlers
+        for handler in handlers:
+            if _EVENT_HANDLER.match(handler):
+                block["event"] = handler
+                break
+    elif prefix == "B":
+        key, _, value = body.partition("=")
+        name = key.strip().upper()
+        if name == "ABS":
+            block["abs_mask"] = value.strip() or None
+        elif name == "EV":
+            block["ev_mask"] = value.strip() or None
+
+
+def _field_value(body, key):
+    # type: (str, str) -> str or None
+    head, sep, tail = body.partition("=")
+    if not sep or head.strip() != key:
+        return None
+    return tail.strip() or None
+
+
+def _unquote(value):
+    # type: (str) -> str or None
+    if value is None:
+        return None
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+def _parse_hex(value):
+    # type: (str) -> int or None
+    try:
+        return int(value, 16)
+    except (TypeError, ValueError):
+        return None
+
+
+def find_input_devices(name):
+    # type: (str) -> list
+    """Every input device whose Name is exactly `name`.
+
+    Exact equality, never a substring test. hid-sony creates three input
+    devices for one DualShock 4 - "Wireless Controller", "Wireless
+    Controller Touchpad" and "Wireless Controller Motion Sensors" - so a
+    substring match returns all three on every run, and the caller's
+    refusal to proceed on an ambiguous match would fire every time.
+
+    With exact matching, more than one result means what it is meant to
+    mean: the same pad arriving over two transports at once. Those use
+    different HID report layouts, so a mapping captured from the wrong
+    one is wrong without ever looking wrong.
+    """
+    text = read_attr(os.path.dirname(INPUT_DEVICES_PATH),
+                     os.path.basename(INPUT_DEVICES_PATH))
+    if text is None:
+        return []
+    return [b for b in parse_input_devices(text) if b.get("name") == name]
+
+
+def transport_of(bus, phys):
+    # type: (int, str) -> tuple
+    """The transport, and how the two independent readings got along.
+
+    BUS_BLUETOOTH is 0x05 and BUS_USB is 0x03, so the bustype settles it
+    outright. The shape of Phys is read as well and compared: an adapter
+    address means Bluetooth, a path containing "usb" means USB. When the
+    two disagree that is reported rather than resolved, because a
+    mapping captured over the wrong transport is silently wrong and this
+    is the only place it could be caught.
+    """
+    from_bus = None
+    if bus == 0x05:
+        from_bus = "bluetooth"
+    elif bus == 0x03:
+        from_bus = "usb"
+
+    from_phys = None
+    if phys:
+        text = phys.strip()
+        if _MAC_PHYS.match(text):
+            from_phys = "bluetooth"
+        elif "usb" in text.lower():
+            from_phys = "usb"
+
+    if from_bus and from_phys:
+        if from_bus == from_phys:
+            return from_bus, "agree"
+        return from_bus, "disagree"
+    if from_bus:
+        return from_bus, "bus-only"
+    if from_phys:
+        return from_phys, "phys-only"
+    return None, "unknown"
+
+
+def read_absinfo(fd, code):
+    # type: (int, int) -> dict or None
+    """One axis's limits from the driver, or None if it will not say.
+
+    This is what makes "80 percent of the range" a measurement rather
+    than a guess: the minimum and maximum come from the driver that owns
+    the device. `flat` is the driver's own deadzone hint and is worth
+    carrying alongside the one derived from measured jitter.
+
+    An axis the device does not have usually answers with all zeros
+    rather than failing, so a zero-width range is treated as absent.
+    """
+    buffer = bytearray(ABSINFO_STRUCT.size)
+    try:
+        fcntl.ioctl(fd, EVIOCGABS_BASE + code, buffer, True)
+    except Exception:
+        return None
+    try:
+        fields = ABSINFO_STRUCT.unpack_from(bytes(buffer))
+    except Exception:
+        return None
+    value, minimum, maximum, fuzz, flat, resolution = fields
+    if maximum <= minimum:
+        return None
+    return {
+        "value": value, "minimum": minimum, "maximum": maximum,
+        "fuzz": fuzz, "flat": flat, "resolution": resolution,
+    }
+
+
+def decode_events(data):
+    # type: (bytes) -> tuple
+    """Whole input_event records out of a buffer, plus the remainder.
+
+    A read can end mid-record. The tail is handed back so the caller can
+    put it in front of the next read rather than discarding it, which
+    would corrupt every record after the first short one.
+    """
+    size = EVENT_STRUCT.size
+    events = []
+    offset = 0
+    while len(data) - offset >= size:
+        fields = EVENT_STRUCT.unpack_from(data, offset)
+        events.append((fields[2], fields[3], fields[4]))
+        offset += size
+    return events, data[offset:]
+
+
+class GamepadReader(object):
+    """One evdev device, read by a thread, summarised into counters.
+
+    The thread never touches MotorControl and never calls touch(). A
+    gamepad being waggled is not evidence that the host is alive, and
+    letting it look like evidence would keep the motor watchdog quiet
+    exactly when the link had died.
+    """
+
+    def __init__(self):
+        # type: () -> None
+        # The same shape as MotorControl: an RLock over all shared
+        # state, an Event that is both the sleep and the exit check, and
+        # a daemon thread so a wedged reader cannot hold the process up.
+        self._lock = threading.RLock()
+        self._stopping = threading.Event()
+        self._thread = None
+        self._fd = -1
+        self._device = None
+        self._absinfo = {}
+        self._codes = {}
+        self._total = 0
+        self._gone = False
+        self._residue = b""
+
+    # -- lifecycle ----------------------------------------------------
+
+    def open(self, name):
+        # type: (str) -> dict
+        """Find the pad, open it non-blocking, and start reading."""
+        self.close()
+
+        matches = find_input_devices(name)
+        if not matches:
+            raise CommandError(
+                "no input device named {0!r}. The pad is off, or it has "
+                "not reconnected: press PS".format(name),
+                "no_gamepad",
+            )
+        if len(matches) > 1:
+            raise CommandError(
+                "{0} devices are named {1!r}: {2}. That is the same pad "
+                "on two transports at once, which use different HID "
+                "report layouts. Disconnect one and start again".format(
+                    len(matches), name, _describe_matches(matches)),
+                "ambiguous_gamepad",
+            )
+
+        device = matches[0]
+        if not device.get("event"):
+            raise CommandError(
+                "{0!r} has no event handler in its Handlers line: {1}"
+                .format(name, " ".join(device.get("handlers") or [])),
+                "no_gamepad",
+            )
+        path = os.path.join(INPUT_DIR, device["event"])
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            raise CommandError(
+                "could not open {0}: {1}".format(path, exc), "no_gamepad")
+
+        transport, agreement = transport_of(device.get("bus"),
+                                            device.get("phys"))
+        absinfo = {}
+        for code in range(ABS_CODE_MAX + 1):
+            info = read_absinfo(fd, code)
+            if info is not None:
+                absinfo[code] = info
+
+        with self._lock:
+            self._fd = fd
+            self._device = device
+            self._absinfo = absinfo
+            self._gone = False
+            self._residue = b""
+            self._total = 0
+            self._codes = {}
+            # Seed every axis from the value the driver reports right
+            # now, so an axis nobody touches still reports where it is
+            # resting instead of a zero it never sent.
+            for code, info in absinfo.items():
+                self._codes[(EV_ABS, code)] = _new_counter(info["value"])
+            self._stopping.clear()
+            self._thread = threading.Thread(target=self._read_loop)
+            self._thread.daemon = True
+            self._thread.start()
+
+        return {
+            "name": device.get("name"),
+            "phys": device.get("phys"),
+            "uniq": device.get("uniq"),
+            "bus": device.get("bus"),
+            "vendor": device.get("vendor"),
+            "product": device.get("product"),
+            "version": device.get("version"),
+            "sysfs": device.get("sysfs"),
+            "handlers": device.get("handlers"),
+            "event": device.get("event"),
+            "path": path,
+            "abs_mask": device.get("abs_mask"),
+            "transport": transport,
+            "transport_agreement": agreement,
+            "absinfo": dict(
+                (str(code), info) for code, info in absinfo.items()),
+            "columns": list(GAMEPAD_STATE_COLUMNS),
+            "event_struct_size": EVENT_STRUCT.size,
+        }
+
+    def close(self):
+        # type: () -> dict
+        """Stop the thread and close the device. Never raises.
+
+        Also called from the agent's teardown, after the motors have
+        been dealt with, so every step is individually optional and the
+        join is bounded. A reader that will not stop must not be able to
+        delay anything.
+        """
+        thread = None
+        with self._lock:
+            was_open = self._fd >= 0
+            self._stopping.set()
+            thread = self._thread
+            self._thread = None
+        if thread is not None:
+            try:
+                thread.join(GAMEPAD_JOIN_TIMEOUT_S)
+            except Exception:
+                pass
+        with self._lock:
+            if self._fd >= 0:
+                try:
+                    os.close(self._fd)
+                except Exception as exc:
+                    warn("gamepad close failed: {0}".format(exc))
+                self._fd = -1
+            self._device = None
+        return {"closed": bool(was_open)}
+
+    # -- the reader ---------------------------------------------------
+
+    def _read_loop(self):
+        # type: () -> None
+        while not self._stopping.is_set():
+            try:
+                self._read_once()
+            except Exception as exc:
+                # A reader that dies on an unexpected error is worse
+                # than no reader, because it still looks like one.
+                warn("gamepad read failed: {0}".format(exc))
+                with self._lock:
+                    self._gone = True
+                return
+
+    def _read_once(self):
+        # type: () -> None
+        with self._lock:
+            fd = self._fd
+        if fd < 0:
+            self._stopping.wait(GAMEPAD_READ_TICK_S)
+            return
+        # select is both the sleep and the responsiveness to close: a
+        # blocking read here would hold the device open for as long as
+        # the operator left the pad alone.
+        ready, _, _ = select.select([fd], [], [], GAMEPAD_READ_TICK_S)
+        if not ready:
+            return
+        try:
+            data = os.read(fd, GAMEPAD_READ_CHUNK)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                # Nothing there after all, or a signal landed between the
+                # select and the read. Transient, and treating it as the
+                # pad walking away would stop the reader for good on a
+                # controller that is still perfectly present.
+                return
+            # ENODEV is the pad actually walking away mid-session, which
+            # is an ordinary thing for a Bluetooth device with a flat
+            # battery to do. Report it and stop reading rather than
+            # spinning on a dead descriptor.
+            warn("gamepad gone: {0}".format(exc))
+            with self._lock:
+                self._gone = True
+            self._stopping.set()
+            return
+        if not data:
+            return
+        with self._lock:
+            events, self._residue = decode_events(self._residue + data)
+            for event_type, code, value in events:
+                if event_type not in GAMEPAD_TYPES:
+                    continue
+                self._total += 1
+                self._accumulate(event_type, code, value)
+
+    def _accumulate(self, event_type, code, value):
+        # type: (int, int, int) -> None
+        """Fold one event into its counters. Caller holds the lock."""
+        key = (event_type, code)
+        counter = self._codes.get(key)
+        if counter is None:
+            # A code seen for the first time starts where it is. Buttons
+            # arrive this way; axes were seeded from absinfo at open.
+            counter = _new_counter(value)
+            self._codes[key] = counter
+        counter["latest"] = value
+        if value < counter["min"]:
+            counter["min"] = value
+        if value > counter["max"]:
+            counter["max"] = value
+        counter["count"] += 1
+        counter["sum"] += value
+        if len(counter["distinct"]) < GAMEPAD_DISTINCT_CAP:
+            counter["distinct"].add(value)
+        elif value not in counter["distinct"]:
+            counter["overflow"] = True
+
+    # -- the host's view ----------------------------------------------
+
+    def state(self):
+        # type: () -> dict
+        """The counters as they stand. Returns at once, never waits."""
+        with self._lock:
+            if self._fd < 0 and not self._gone:
+                raise CommandError(
+                    "the gamepad is not open; send gamepad_open first",
+                    "no_gamepad",
+                )
+            rows = []
+            for key in sorted(self._codes):
+                counter = self._codes[key]
+                low = counter["min"]
+                high = counter["max"]
+                interior = len([v for v in counter["distinct"]
+                                if low < v < high])
+                rows.append([
+                    key[0], key[1], counter["latest"], low, high,
+                    counter["count"], counter["sum"],
+                    len(counter["distinct"]), interior,
+                    bool(counter["overflow"]),
+                ])
+            return {
+                "present": self._fd >= 0 and not self._gone,
+                "device_gone": bool(self._gone),
+                "total_events": self._total,
+                "rows": rows,
+            }
+
+    def reset_window(self):
+        # type: () -> dict
+        """Clear the window without closing the device.
+
+        Each wizard step measures only what happened during it, so this
+        resets the extremes to wherever the control is sitting right
+        now. The device stays open: reopening it between steps would
+        lose events during the gap and make the pad look intermittent.
+        """
+        with self._lock:
+            if self._fd < 0:
+                raise CommandError(
+                    "the gamepad is not open; send gamepad_open first",
+                    "no_gamepad",
+                )
+            for counter in self._codes.values():
+                latest = counter["latest"]
+                counter["min"] = latest
+                counter["max"] = latest
+                counter["count"] = 0
+                counter["sum"] = 0
+                counter["distinct"] = set([latest])
+                counter["overflow"] = False
+            self._total = 0
+            return {"reset": True, "codes": len(self._codes)}
+
+
+def _new_counter(value):
+    # type: (int) -> dict
+    return {
+        "latest": value, "min": value, "max": value,
+        "count": 0, "sum": 0, "distinct": set([value]), "overflow": False,
+    }
+
+
+def _describe_matches(matches):
+    # type: (list) -> str
+    parts = []
+    for block in matches:
+        parts.append("{0} phys={1} bus={2}".format(
+            block.get("event") or "?",
+            block.get("phys") or "?",
+            block.get("bus")))
+    return "; ".join(parts)
+
+
+GAMEPAD = GamepadReader()
+
+
+# ---------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------
 
@@ -688,6 +1267,14 @@ def dispatch(command, control):
                               require(command, "mode"))
     if name == "stop_all":
         return control.stop_all()
+    if name == "gamepad_open":
+        return GAMEPAD.open(command.get("name") or GAMEPAD_NAME)
+    if name == "gamepad_state":
+        return GAMEPAD.state()
+    if name == "gamepad_reset_window":
+        return GAMEPAD.reset_window()
+    if name == "gamepad_close":
+        return GAMEPAD.close()
     if name == "bye":
         return {"bye": True}
     raise CommandError(
@@ -803,7 +1390,17 @@ def main():
         warn("fatal: {0}: {1}".format(type(exc).__name__, exc))
         return 1
     finally:
+        # Motors first, always, and by the same call as before. The
+        # gamepad is not a hazard: a device left open costs a file
+        # descriptor on a process that is about to exit, while a motor
+        # left commanded keeps turning until the battery is pulled. So
+        # the stop-all keeps its place at the head of the teardown and
+        # cannot be delayed by anything below it.
         control.shutdown()
+        try:
+            GAMEPAD.close()
+        except Exception as exc:
+            warn("gamepad teardown failed: {0}".format(exc))
     return 0
 
 

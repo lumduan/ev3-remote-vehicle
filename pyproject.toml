@@ -16,7 +16,16 @@ dependencies = [
 [dependency-groups]
 dev = [
     "ruff>=0.6",
+    "pytest>=8",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Confined to tests/ deliberately. Nothing under agent/ may be imported:
+# it is source for a different interpreter on a different machine, and
+# tests/test_gamepad.py reads it as text and execs it in a throwaway
+# namespace rather than importing it. See CLAUDE.md, "Two runtimes".
 
 [project.scripts]
 ev3ctl = "ev3ctl:main"

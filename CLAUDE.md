@@ -193,6 +193,41 @@ would resolve it, and handle its absence in code. Specifically:
 A number in a document with no source is worse than no number, because
 the next person will build on it.
 
+## Reading the gamepad
+
+The gamepad is a Linux input device, and the rules for it are the same
+rules as for motors: read the facts, never assume them.
+
+- **Find the pad by exact name, never by node and never by substring.**
+  `/dev/input/event4` is an observation from one session, not a stable
+  path, and `/dev/input/by-id/` does not exist on this brick. Parse
+  `/proc/bus/input/devices` and match `N: Name="..."` on **equality**.
+  hid-sony creates three input devices for one DualShock 4, so a
+  substring test matches all three every time. Two exact matches means
+  the pad is on Bluetooth and USB at once; refuse to proceed, because
+  the transports use different HID report layouts.
+- **`struct input_event` is 16 bytes here, not 24.** `struct timeval` is
+  two 32-bit longs on this kernel. Use `struct.Struct("=llHHi")`; the
+  native `"@llHHi"` is 24 on any 64-bit development machine and parsing
+  16-byte records as 24-byte ones yields nonsense without raising.
+- **Axis limits come from `EVIOCGABS`, not from a controller layout.**
+  That is what makes "80 percent of the range" a measurement. It also
+  supplies the driver's own `flat` deadzone, worth carrying next to any
+  deadzone derived from measured jitter.
+- **Never write an axis-to-control assignment that was not observed.**
+  `src/ev3ctl/evdev_codes.py` maps code numbers to names and nothing
+  else. Knowing that code 0 is called `ABS_X` is a different claim from
+  knowing which stick moves it. Where the measurement genuinely cannot
+  say - a circular sweep cannot tell a stick's horizontal axis from its
+  vertical one - write null.
+- **Aggregate on the brick.** A round trip is about 96 ms idle and
+  168 ms under load. Events are accumulated into counters by a reader
+  thread and the host asks for the counters; individual events are never
+  queued and never sent. That thread must never touch the motor
+  watchdog's keep-alive: a waggled gamepad is not evidence that the host
+  is alive, and letting it look like evidence would keep the watchdog
+  quiet exactly when it is the only thing left to stop the motors.
+
 ## Bluetooth is for the gamepad only
 
 The brick has one Bluetooth radio, and the gamepad owns it. The

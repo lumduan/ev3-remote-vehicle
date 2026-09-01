@@ -11,11 +11,14 @@ Nothing here reaches the network or the hardware. It is handed an
 inventory and a snapshot and turns them into a frame.
 """
 
+import time
+
 from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from . import evdev_codes, gamepad
 from .model import (
     DASH,
     INPUT_PORTS,
@@ -386,3 +389,334 @@ def drive_dashboard(drive):
         Layout(drive_footer(drive), name="footer", size=8),
     )
     return layout
+
+
+# ---------------------------------------------------------------------
+# gamepad
+#
+# The wizard renders a question rather than a dashboard, so every frame
+# has to answer three things at once: what to do now, what the device is
+# doing about it, and how far that is from being enough. The third is the
+# one the approach this replaces could not show.
+# ---------------------------------------------------------------------
+
+GAMEPAD_HELP = (
+    "[head]s[/head] skip step   "
+    "[head]r[/head] redo step   "
+    "[head]q[/head] abort"
+)
+
+BAR_WIDTH = 12
+
+
+def _bar(fraction):
+    """A progress bar that reads as done or not done at a glance."""
+    filled = int(round(_clamp01(fraction) * BAR_WIDTH))
+    body = "#" * filled + "-" * (BAR_WIDTH - filled)
+    if fraction >= 1.0:
+        return "[ok]" + body + "[/ok]"
+    return "[warn]" + body + "[/warn]"
+
+
+def _clamp01(value):
+    if value is None or value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+
+def _axis_label(key):
+    name = evdev_codes.code_name(key[0], key[1])
+    if name is None:
+        return "{0} {1}".format(evdev_codes.type_name(key[0]) or key[0],
+                                key[1])
+    return name
+
+
+def gamepad_header(wizard):
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim", justify="right")
+    grid.add_column()
+    session = wizard.session
+    grid.add_row("host", text(session.hostname) + "  [dim]via[/dim] "
+                 + text(session.host))
+    device = wizard.device or {}
+    if device:
+        grid.add_row("device", text(device.get("name")) + "  [dim]"
+                     + text(device.get("event")) + "[/dim]")
+        grid.add_row("transport", _transport_markup(device))
+        grid.add_row("ids", "[dim]phys[/dim] " + text(device.get("phys"))
+                     + "   [dim]uniq[/dim] " + text(device.get("uniq"))
+                     + "   [dim]bus[/dim] " + _bus_markup(device))
+    else:
+        grid.add_row("device", "[warn]waiting[/warn]")
+    grid.add_row("steps", _step_ladder(wizard))
+    grid.add_row("link", wizard.link_status() + "   [dim]events[/dim] "
+                 + str(wizard.total_events))
+    return Panel(grid, title="ev3ctl gamepad", title_align="left",
+                 padding=(0, 1))
+
+
+def _bus_markup(device):
+    bus = device.get("bus")
+    if bus is None:
+        return DASH
+    name = evdev_codes.bus_name(bus)
+    shown = "0x{0:02x}".format(bus)
+    if name:
+        shown += " " + name
+    return shown
+
+
+def _transport_markup(device):
+    """The transport, and a loud warning when it is the wrong one.
+
+    A mapping captured over USB does not describe the Bluetooth link the
+    vehicle will actually be driven over: the two use different HID
+    report layouts, so the axis numbers can differ. Saying so here is
+    cheaper than discovering it in a control loop.
+    """
+    transport = device.get("transport")
+    agreement = device.get("transport_agreement")
+    if transport == "bluetooth":
+        shown = "[ok]Bluetooth[/ok]"
+    elif transport == "usb":
+        shown = ("[fail]USB - this mapping will apply to USB ONLY and "
+                 "must be recaptured over Bluetooth before use[/fail]")
+    else:
+        shown = "[warn]unknown[/warn]"
+    if agreement == "disagree":
+        shown += ("  [warn]Bus and Phys disagree about this; trusting "
+                  "Bus[/warn]")
+    elif agreement in ("bus-only", "phys-only"):
+        shown += "  [dim]({0})[/dim]".format(agreement)
+    return shown
+
+
+def _step_ladder(wizard):
+    parts = []
+    for index, title, _ in gamepad.STEPS:
+        if index == wizard.step:
+            parts.append("[sel] " + title + " [/sel]")
+        elif index < wizard.step:
+            parts.append("[ok]" + title + "[/ok]")
+        else:
+            parts.append("[dim]" + title + "[/dim]")
+    return " [dim]>[/dim] ".join(parts)
+
+
+def gamepad_codes_table(wizard):
+    """Every code seen in this step, with its value and its range.
+
+    Buttons and axes share the table on purpose. An operator who nudges
+    a stick during the button step, or brushes the D-pad during a stick
+    sweep, can see that it happened rather than wondering why the step
+    will not advance.
+    """
+    table = Table(
+        title="Seen in this step", title_justify="left",
+        header_style="head", expand=True, padding=(0, 1),
+    )
+    table.add_column("Code", min_width=14)
+    table.add_column("N", justify="right", width=5)
+    table.add_column("Value", justify="right", width=8)
+    table.add_column("Min", justify="right", width=7)
+    table.add_column("Max", justify="right", width=7)
+    table.add_column("Rest", justify="right", width=8)
+    table.add_column("Toward -", width=BAR_WIDTH + 2)
+    table.add_column("Toward +", width=BAR_WIDTH + 2)
+
+    for key, entry in sorted(wizard.codes.items()):
+        if entry["count"] == 0 and key[0] == evdev_codes.EV_KEY:
+            continue
+        rest_entry = wizard.rest.get(key, {})
+        rest_mean = rest_entry.get("mean")
+        low, high, _ = gamepad.axis_range(wizard.drivers.get(key), entry)
+        if key[0] == evdev_codes.EV_ABS and low is not None:
+            if wizard.step in gamepad.STICK_STEPS:
+                down, up = _sweep_bars(entry, rest_mean, low, high)
+            else:
+                up, down = gamepad.trigger_progress(entry, low, high)
+                down, up = _bar(down), _bar(up)
+        else:
+            down, up = DASH, DASH
+        table.add_row(
+            _axis_label(key)
+            + (" [dim]hat[/dim]" if evdev_codes.is_hat(*key) else ""),
+            str(key[1]),
+            number(entry["latest"]),
+            number(entry["min"]),
+            number(entry["max"]),
+            number(rest_mean, 1) if rest_mean is not None else DASH,
+            down, up,
+        )
+    if not wizard.codes:
+        table.add_row("[empty]nothing yet[/empty]", DASH, DASH, DASH,
+                      DASH, DASH, DASH, DASH)
+    return table
+
+
+def _sweep_bars(entry, rest_mean, low, high):
+    up, down = gamepad.sweep_progress(entry, rest_mean, low, high)
+    if gamepad.too_coarse(low, high):
+        # A hat declares a range of 2 and would otherwise show two full
+        # bars the instant it is brushed, which reads as a passing stick.
+        return "[dim]too coarse[/dim]", "[dim]too coarse[/dim]"
+    return _bar(down), _bar(up)
+
+
+def gamepad_footer(wizard):
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column()
+    grid.add_row(Text.from_markup(
+        "[head]" + wizard.step_title() + "[/head]  "
+        + wizard.instruction()))
+    grid.add_row(Text.from_markup(_condition(wizard)))
+    grid.add_row(Text.from_markup(GAMEPAD_HELP))
+    if wizard.blocked:
+        grid.add_row(Text.from_markup(
+            "[fail]" + _one_line(wizard.blocked) + "[/fail]"))
+    elif wizard.last_error:
+        grid.add_row(Text.from_markup(
+            "[fail]" + _one_line(wizard.last_error) + "[/fail]"))
+    else:
+        grid.add_row(Text(""))
+    return Panel(grid, padding=(0, 1))
+
+
+def _condition(wizard):
+    """The advance condition, and how close this step is to meeting it."""
+    step = wizard.step
+    if wizard.device is None:
+        return ("[dim]advances when[/dim] the controller appears. "
+                "[warn]Waiting - press PS.[/warn]")
+    if wizard.device_gone:
+        # The known failure on this controller: it powers itself off
+        # when the pack is low. Saying which it is saves the operator
+        # debugging Bluetooth when the answer is a charger.
+        return ("[fail]The controller has disconnected. It powers itself "
+                "off when its battery is low - put it on a charger, then "
+                "press PS and r to redo this step.[/fail]")
+    if step == gamepad.REST:
+        return ("[dim]advances after[/dim] {0:.0f}s of continuous data "
+                "{1}".format(gamepad.REST_SECONDS,
+                             _bar(wizard.rest_progress(time.monotonic()))))
+    if step in gamepad.STICK_STEPS:
+        found = gamepad.qualifying_axes(
+            wizard.codes, wizard.drivers, wizard.rest)
+        if step == gamepad.RIGHT:
+            previous = wizard.step_axes.get(gamepad.LEFT, ())
+            if wizard.wrong_stick:
+                return ("[fail]Those are the same two axes step 2 found. "
+                        "That is most likely the LEFT stick again - try "
+                        "the right one, or press r to redo.[/fail]")
+            found = [key for key in found if key not in previous]
+        names = ", ".join(_axis_label(key) for key in found) or "none yet"
+        return ("[dim]advances when[/dim] exactly 2 axes have swept 80% "
+                "of their range both ways   [dim]so far[/dim] {0}/2 "
+                "[ok]{1}[/ok]".format(len(found), names))
+    if step in gamepad.TRIGGER_STEPS:
+        found = gamepad.qualifying_triggers(
+            wizard.codes, wizard.drivers, exclude=wizard.claimed())
+        names = ", ".join(_axis_label(key) for key in found) or "none yet"
+        return ("[dim]advances when[/dim] 1 new axis spans its range   "
+                "[dim]so far[/dim] {0}/1 [ok]{1}[/ok]".format(
+                    len(found), names))
+    if step == gamepad.BUTTONS:
+        prompt = wizard.button_prompt()
+        if prompt is None:
+            return ("[ok]Every prompt recorded.[/ok] "
+                    "[dim]press s to go on[/dim]")
+        return ("[head]Press: {0}[/head]   [dim]{1} of {2} recorded - "
+                "this step advances only when you press s[/dim]".format(
+                    prompt, len(wizard.buttons),
+                    len(gamepad.BUTTON_PROMPTS)))
+    if step == gamepad.SUMMARY:
+        if wizard.written_to:
+            return "[ok]Written to " + wizard.written_to + "[/ok]"
+        return "[fail]Nothing was written.[/fail]"
+    return ""
+
+
+def gamepad_dashboard(wizard):
+    layout = Layout()
+    layout.split_column(
+        Layout(gamepad_header(wizard), name="header", size=10),
+        Layout(gamepad_codes_table(wizard), name="codes"),
+        Layout(gamepad_footer(wizard), name="footer", size=7),
+    )
+    return layout
+
+
+# -- the summary, printed after the alternate screen has gone ---------
+
+def gamepad_summary_table(wizard):
+    table = Table(
+        title="Axes", title_justify="left", header_style="head",
+        expand=True, padding=(0, 1),
+    )
+    table.add_column("Axis", min_width=12)
+    table.add_column("Code", justify="right", width=5)
+    table.add_column("Control", min_width=12)
+    table.add_column("Min", justify="right", width=7)
+    table.add_column("Max", justify="right", width=7)
+    table.add_column("Rest", justify="right", width=8)
+    table.add_column("Spread", justify="right", width=7)
+    table.add_column("Deadzone", justify="right", width=9)
+    table.add_column("Flat", justify="right", width=6)
+    table.add_column("Source", width=9)
+
+    for record in wizard.mapping()["axes"]:
+        control = record["control"]
+        if control is None:
+            control = "[empty]unassigned[/empty]"
+        elif record.get("continuous") == "extremes-only":
+            control += " [fail]digital[/fail]"
+        elif record.get("continuous") == "continuous":
+            control += " [ok]analog[/ok]"
+        elif record.get("continuous") == "few":
+            control += " [warn]few steps[/warn]"
+        table.add_row(
+            text(record["name"]),
+            str(record["code"]),
+            control,
+            number(record["observed_min"]),
+            number(record["observed_max"]),
+            number(record["rest_mean"], 1),
+            number(record["rest_spread"]),
+            number(record["suggested_deadzone"]),
+            number(record["driver_flat"]),
+            text(record["range_source"]),
+        )
+    return table
+
+
+def gamepad_buttons_table(wizard):
+    table = Table(
+        title="Buttons", title_justify="left", header_style="head",
+        expand=True, padding=(0, 1),
+    )
+    table.add_column("Asked for", min_width=14)
+    table.add_column("Type", width=8)
+    table.add_column("Code", justify="right", width=6)
+    table.add_column("Name", min_width=16)
+    table.add_column("Value", justify="right", width=7)
+
+    records = wizard.mapping()["buttons"]
+    if not records:
+        table.add_row("[empty]none recorded[/empty]", DASH, DASH, DASH,
+                      DASH)
+        return table
+    for record in records:
+        name = text(record["name"])
+        if record["alias"]:
+            name += " [dim]= " + record["alias"] + "[/dim]"
+        table.add_row(
+            text(record["label"]),
+            text(record["type"]),
+            str(record["code"]),
+            name,
+            number(record["value"]),
+        )
+    return table
