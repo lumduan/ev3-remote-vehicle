@@ -65,7 +65,7 @@ RIGHT_PORT = "outD"
 # for three seconds to step to the next one, wrapping round. The first
 # entry is where every run starts, so it is the gentle one.
 SPEED_LEVELS = (50, 75, 100)
-SPEED_HOLD_S = 3.0
+SPEED_HOLD_S = 1.5
 
 # Buttons, held down and read back with EVIOCGKEY on 2026-09-01 rather
 # than taken from a table: L1 reported 310 and R1 reported 311.
@@ -86,6 +86,14 @@ SCREEN_REBUILD_S = 2.0
 SLEW_PCT_PER_LOOP = 10
 
 LOOP_PERIOD_S = 0.05          # 20 Hz
+
+# What stop means. These motors ship on `coast`, which freewheels for
+# about 0.48 s after the drive is cut - measured on this hardware and
+# recorded in ROADMAP.md, where brake falls from 229 to 32 deg/s in
+# 0.11 s instead. Coasting is why a wheel appeared to "run slow" when
+# the stick was released or R1 was held: it was not being driven, it was
+# still turning. Braking makes stopping look like stopping.
+STOP_ACTION = "brake"
 STICK_PATH_NAME = "Wireless Controller"
 INPUT_DEVICES = "/proc/bus/input/devices"
 INPUT_DIR = "/dev/input"
@@ -688,7 +696,14 @@ class Motors(object):
             self.paths[side] = node
             self.duty[side] = 0.0
         self._handles = {}
+        self.stop_action = {}
         for side, node in self.paths.items():
+            # Before run-direct, so the mode is settled before anything
+            # can be commanded.
+            previous = self._read(node, "stop_action")
+            self._write(node, "stop_action", STOP_ACTION)
+            self.stop_action[side] = (
+                previous, self._read(node, "stop_action"))
             self._write(node, "command", "run-direct")
             self._handles[side] = open(
                 os.path.join(node, "duty_cycle_sp"), "w")
@@ -723,6 +738,15 @@ class Motors(object):
         except Exception:
             pass
         return found
+
+    @staticmethod
+    def _read(node, name):
+        # type: (str, str) -> str or None
+        try:
+            with open(os.path.join(node, name)) as handle:
+                return handle.read().strip()
+        except Exception:
+            return None
 
     @staticmethod
     def _write(node, name, value):
@@ -797,8 +821,12 @@ def main():
     sys.stderr.write(
         "motors: left {0}, right {1}   speed {2}%\n".format(
             LEFT_PORT, RIGHT_PORT, SPEED_LEVELS[level]))
+    for side in sorted(motors.stop_action):
+        was, now_action = motors.stop_action[side]
+        sys.stderr.write("  {0}: stop_action {1} -> {2}\n".format(
+            side, was, now_action))
     sys.stderr.write(
-        "hold L1 {0:.0f}s to change speed, press R1 for battery. "
+        "hold L1 {0:.1f}s to change speed, press R1 for battery. "
         "Ctrl-C to stop.\n".format(SPEED_HOLD_S))
     sys.stderr.flush()
     set_speed_leds(level)
