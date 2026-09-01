@@ -31,6 +31,17 @@ REMOTE_AGENT_PATH = "/tmp/ev3_agent.py"
 AGENT_FILENAME = "ev3_agent.py"
 
 DEFAULT_TIMEOUT_S = 8.0
+
+# The first `hello` is not a round trip like the others. It waits for
+# ssh to connect, for the brick's python3 to start, and for it to
+# compile the agent, none of which happen again for the rest of the
+# session. Measured on this brick on 2026-09-01, at load average 3.08
+# with the gamepad connected: `ssh true` 3.9 s, `python3 -c pass` 9.6 s,
+# and the whole handshake 17.1 s - against a steady-state round trip of
+# 96 ms for `drive`. One number cannot serve both, and the 8 s that is
+# generous for the second is not enough for the first.
+HANDSHAKE_TIMEOUT_S = 45.0
+
 CONNECT_TIMEOUT_S = 10
 READ_CHUNK = 65536
 
@@ -204,8 +215,12 @@ class Link(object):
         self._start_multiplexing()
         self._copy_agent()
         self._spawn_agent()
+        # Never shorter than the per-command timeout: --timeout is
+        # there to be raised on a slow link, and raising it must not
+        # somehow shorten the one wait that is already the longest.
+        handshake = max(HANDSHAKE_TIMEOUT_S, self.timeout)
         try:
-            self.hello = self.request("hello", timeout=self.timeout)
+            self.hello = self.request("hello", timeout=handshake)
         except LinkError:
             self.close()
             raise
