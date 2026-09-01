@@ -55,6 +55,9 @@ LEFT = gamepad.LEFT
 RIGHT = gamepad.RIGHT
 BUTTONS = gamepad.BUTTONS
 SUMMARY = gamepad.SUMMARY
+SWEEP = gamepad.SWEEP
+HOLD_RIGHT = gamepad.HOLD_RIGHT
+HOLD_UP = gamepad.HOLD_UP
 STEPS = gamepad.STEPS
 RESETTING_STEPS = gamepad.RESETTING_STEPS
 STICK_CONTROLS = gamepad.STICK_STEPS
@@ -64,10 +67,11 @@ TRIGGER_CONTROLS = gamepad.TRIGGER_STEPS
 class Wizard(object):
     """Everything the frame is drawn from, and the step machine."""
 
-    def __init__(self, session, output_path, name=None):
+    def __init__(self, session, output_path, name=None, uniq=None):
         self.session = session
         self.output_path = output_path
         self.name = name
+        self.uniq = uniq
         self.step = CONNECT
         self.quit = False
         self.aborted = False
@@ -109,6 +113,14 @@ class Wizard(object):
         # ever holds the current step and the summary needs all of them.
         self.step_windows = {}
         self.continuity = {}
+        # Where a stick step has got to: the sweep, then the two
+        # directional holds that tell horizontal from vertical.
+        self.phase = SWEEP
+        self.hold_since = None
+        self.hold_outcome = None
+        self.orientation = {}
+        self.polarity = {}
+        self.hold_deviations = {}
         self.buttons = []
         self.button_index = 0
         self.wrong_stick = False
@@ -128,6 +140,12 @@ class Wizard(object):
         return STEPS[self.step][1]
 
     def instruction(self):
+        """What to do now, which inside a stick step depends on phase."""
+        if self.step in STICK_CONTROLS and self.phase != SWEEP:
+            side = "LEFT" if self.step == LEFT else "RIGHT"
+            pushed = gamepad.HOLD_DIRECTIONS[self.phase][0]
+            return ("Push the {0} stick fully {1} and hold it there, "
+                    "along that one direction only.".format(side, pushed))
         return STEPS[self.step][2]
 
     def claimed(self):
@@ -220,6 +238,9 @@ class Wizard(object):
         self.step = step
         self.armed = step not in RESETTING_STEPS
         self.rest_since = None
+        self.hold_since = None
+        self.hold_outcome = None
+        self.phase = SWEEP
         self.wrong_stick = False
         self.codes = {}
         if step in RESETTING_STEPS:
@@ -229,8 +250,25 @@ class Wizard(object):
             self._write_mapping()
 
     def redo(self):
-        """Start the current step again, forgetting what it found."""
+        """Start the current step again, forgetting what it found.
+
+        During a directional hold this restarts only that hold. The
+        sweep already established which pair of axes the stick owns, and
+        making the operator sweep again to correct a diagonal push would
+        throw away a good measurement to fix a different one.
+        """
+        if self.step in STICK_CONTROLS and self.phase != SWEEP:
+            for key in self.step_axes.get(self.step, ()):
+                self.orientation.pop(key, None)
+                self.polarity.pop(key, None)
+            self.enter_hold(self.phase)
+            return
         self.step_axes.pop(self.step, None)
+        for key in list(self.orientation):
+            if self.assignments.get(key) == STICK_CONTROLS.get(self.step):
+                self.orientation.pop(key, None)
+                self.polarity.pop(key, None)
+                self.hold_deviations.pop(key, None)
         for key, control in list(self.assignments.items()):
             if control == STICK_CONTROLS.get(self.step) or \
                     control == TRIGGER_CONTROLS.get(self.step):
@@ -268,7 +306,7 @@ class Wizard(object):
         if self.step == REST:
             self._tick_rest(now)
         elif self.step in STICK_CONTROLS:
-            self._tick_stick()
+            self._tick_stick(now)
         elif self.step in TRIGGER_CONTROLS:
             self._tick_trigger()
         elif self.step == BUTTONS:
@@ -315,7 +353,18 @@ class Wizard(object):
             return 0.0
         return min(1.0, (now - self.rest_since) / gamepad.REST_SECONDS)
 
-    def _tick_stick(self):
+    def _tick_stick(self, now):
+        if self.phase == SWEEP:
+            self._tick_sweep()
+        else:
+            self._tick_hold(now)
+
+    def _tick_sweep(self):
+        """Which pair of axes this stick owns. Unchanged, and still first.
+
+        The holds are added after this passes, not instead of it: the
+        pair has to be known before there is anything to disambiguate.
+        """
         found = gamepad.qualifying_axes(
             self.codes, self.drivers, self.rest)
         previous = self.step_axes.get(LEFT, ())
@@ -333,8 +382,105 @@ class Wizard(object):
         self.step_axes[self.step] = tuple(found)
         for key in found:
             self.assignments[key] = STICK_CONTROLS[self.step]
+            # Captured before the holds reset the window, so the file
+            # reports the range the sweep saw rather than the much
+            # smaller one a held stick produces.
             self.step_windows[key] = self.codes[key]
+        self.enter_hold(HOLD_RIGHT)
+
+    def enter_hold(self, phase):
+        """Begin a directional hold, measuring only from here on.
+
+        The window is reset so the deviations describe this hold alone.
+        That also makes a retry cleaner than a first attempt: the stick
+        is usually already where it should be by then, so the axis that
+        should not move starts and stays at its rest value.
+        """
+        self.phase = phase
+        self.hold_since = None
+        self.hold_outcome = None
+        self.armed = False
+        self.codes = {}
+        self.reset_id = self.track(
+            self.session.send_gamepad_reset_window(), "reset")
+
+    def _tick_hold(self, now):
+        pair = self.step_axes.get(self.step, ())
+        if len(pair) != gamepad.STICK_AXES_PER_STEP:
+            return
+        if not self.present:
+            self.hold_since = None
+            return
+        if self.hold_since is None:
+            self.hold_since = now
+            return
+        if now - self.hold_since < gamepad.HOLD_SECONDS:
+            return
+
+        outcome = gamepad.resolve_hold(
+            pair, self.codes, self.rest, self.drivers)
+        self.hold_outcome = outcome
+        if outcome["verdict"] != "ok":
+            # Say what went wrong and measure again from here, so that
+            # correcting the push is enough. The whole step is not
+            # restarted: the sweep already established the pair, and
+            # making the operator sweep again to fix a diagonal would
+            # punish them for the tool's question being imprecise.
+            self.note(_hold_complaint(self.phase, outcome))
+            self.enter_hold(self.phase)
+            # Re-attached after the re-entry, which clears it: the
+            # verdict that was just rejected is the most useful thing on
+            # the screen while the operator corrects their push.
+            self.hold_outcome = outcome
+            return
+
+        key, orientation, direction = gamepad.hold_outcome(
+            self.phase, outcome)
+        if self.phase == HOLD_UP and self.orientation.get(key) is not None:
+            # The axis that led this hold is the one the right hold
+            # already named horizontal, so the stick was pushed sideways
+            # again rather than up. Naming it vertical as well would put
+            # a contradiction in the file and leave the other axis of the
+            # pair with no orientation at all.
+            self.note(
+                "{0} is the axis that led the RIGHT hold, so that was "
+                "another sideways push. Push the stick UP - at a right "
+                "angle to the last one - and hold.".format(
+                    evdev_codes.label(*key)))
+            self.enter_hold(self.phase)
+            self.hold_outcome = outcome
+            return
+        self.orientation[key] = orientation
+        self.polarity[key] = direction
+        self._record_deviations(outcome)
+        self.note(None)
+
+        if self.phase == HOLD_RIGHT:
+            self.enter_hold(HOLD_UP)
+            return
+        # The other axis of the pair is the one this hold did not name,
+        # and the sweep already proved it belongs to this stick.
         self.enter(self.step + 1)
+
+    def _record_deviations(self, outcome):
+        """Keep what both axes did, so the decision can be re-checked."""
+        label = "right_hold" if self.phase == HOLD_RIGHT else "up_hold"
+        for key, value in outcome["deviations"].items():
+            record = self.hold_deviations.setdefault(key, {})
+            record[label] = round(value, 2) if value is not None else None
+
+    def hold_progress(self, now):
+        if self.hold_since is None:
+            return 0.0
+        return min(1.0, (now - self.hold_since) / gamepad.HOLD_SECONDS)
+
+    def live_hold(self):
+        """The outcome as it stands right now, for the live display."""
+        pair = self.step_axes.get(self.step, ())
+        if len(pair) != gamepad.STICK_AXES_PER_STEP:
+            return None
+        return gamepad.resolve_hold(
+            pair, self.codes, self.rest, self.drivers)
 
     def _tick_trigger(self):
         found = gamepad.qualifying_triggers(
@@ -439,6 +585,9 @@ class Wizard(object):
             drivers=self.drivers,
             buttons=self.buttons,
             declared_axes=self.declared_axes,
+            orientation=self.orientation,
+            polarity=self.polarity,
+            hold_deviations=self.hold_deviations,
         )
 
     def codes_for_output(self):
@@ -457,6 +606,24 @@ class Wizard(object):
 
     def render(self):
         return ui.gamepad_dashboard(self)
+
+
+def _hold_complaint(phase, outcome):
+    """Why a hold was not accepted, in terms the operator can act on."""
+    pushed = gamepad.HOLD_DIRECTIONS[phase][0]
+    verdict = outcome["verdict"]
+    if verdict == "soft":
+        return ("Nothing moved far enough to be a deliberate push. Hold "
+                "the stick fully {0} against the rim and keep it "
+                "there.".format(pushed))
+    if verdict == "diagonal":
+        ratio = outcome["ratio"]
+        return ("Both axes moved by a similar amount ({0:.1f}x apart, "
+                "and {1:.0f}x is wanted), so that was a diagonal. Push "
+                "straight {2} - along one axis only - and hold."
+                .format(ratio or 0.0, gamepad.HOLD_RATIO, pushed))
+    return ("There is no rest measurement to compare against, so the "
+            "deflection cannot be judged. Redo step 1.")
 
 
 def _timestamp():
@@ -498,7 +665,8 @@ def run(args):
     )
     try:
         wizard = Wizard(session, output_path,
-                        name=getattr(args, "name", None))
+                        name=getattr(args, "name", None),
+                        uniq=getattr(args, "uniq", None))
         keyboard.open()
         try:
             _loop(session, keyboard, wizard)
@@ -543,6 +711,22 @@ def _report(wizard):
                       "captured.[/warn]")
         console.print()
         return
+    device = wizard.device or {}
+    source = device.get("identity_source")
+    value = device.get("identity_value")
+    console.print()
+    if source == "uniq":
+        console.print("[ok]Identified by[/ok] Uniq " + str(value)
+                      + "  [dim]the controller's own address, the same "
+                      "on either transport[/dim]")
+    elif source == "name":
+        console.print("[warn]Identified by[/warn] Name " + repr(value)
+                      + "  [dim]this device reports no Uniq, so the "
+                      "fallback was used; Name can differ between "
+                      "transports[/dim]")
+    else:
+        console.print("[warn]Identity field not reported by the "
+                      "agent.[/warn]")
     console.print()
     console.print(ui.gamepad_summary_table(wizard))
     console.print()

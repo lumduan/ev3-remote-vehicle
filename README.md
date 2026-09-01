@@ -260,8 +260,9 @@ enough, rather than only that it is waiting.
 | `q` | abort; the same teardown as finishing |
 
 Press PS to wake the controller when step 0 asks for it. Steps 2 and 3
-want a full circular sweep of one stick; steps 4 and 5 want a trigger
-squeezed all the way in and released, three times. Step 6 names each
+want a full circular sweep of one stick, then two holds: push that stick
+fully right and hold, then fully up and hold. Steps 4 and 5 want a
+trigger squeezed all the way in and released, three times. Step 6 names each
 button in turn and ends when you press `s`.
 
 **Nothing in the output file is taken from a published controller
@@ -276,10 +277,19 @@ Two things worth knowing before the first run:
 - **If the pad is on USB and Bluetooth at once, the wizard refuses to
   start.** The two transports use different HID report layouts, so a
   mapping captured from the wrong one would be wrong without ever
-  looking wrong. Unplug the cable and press PS.
-- **Which of a stick's two axes is horizontal is left unmeasured.** A
-  circular sweep moves both through their whole range, so it cannot tell
-  them apart, and guessing is the one thing this tool exists to avoid.
+  looking wrong. Unplug the cable and press PS. The pad is identified by
+  its `Uniq` field - its own Bluetooth address, which hid-sony sets the
+  same on both transports - so the guard still fires when the two
+  transports report different Names. The Name is only the fallback, for
+  a device that reports no `Uniq` at all, and the report says which of
+  the two was used.
+- **Which axis is horizontal is measured, not assumed.** The circular
+  sweep names the pair; it cannot tell them apart, because it drives
+  both through their whole range. So each stick step then asks for two
+  directional holds - push right, then up - and names the axis that
+  deflects further each time. Push diagonally and the hold is refused
+  and retried rather than accepted, because an orientation taken from a
+  diagonal is a coin flip the file would present as a measurement.
 
 ### Two things that surprise people
 

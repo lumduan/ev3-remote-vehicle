@@ -634,6 +634,7 @@ GAMEPAD_STATE_COLUMNS = (
 _MAC_PHYS = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}", re.IGNORECASE)
 
 _EVENT_HANDLER = re.compile(r"^event\d+$")
+_JS_HANDLER = re.compile(r"^js\d+$")
 
 
 def parse_input_devices(text):
@@ -734,26 +735,101 @@ def _parse_hex(value):
         return None
 
 
-def find_input_devices(name):
-    # type: (str) -> list
-    """Every input device whose Name is exactly `name`.
-
-    Exact equality, never a substring test. hid-sony creates three input
-    devices for one DualShock 4 - "Wireless Controller", "Wireless
-    Controller Touchpad" and "Wireless Controller Motion Sensors" - so a
-    substring match returns all three on every run, and the caller's
-    refusal to proceed on an ambiguous match would fire every time.
-
-    With exact matching, more than one result means what it is meant to
-    mean: the same pad arriving over two transports at once. Those use
-    different HID report layouts, so a mapping captured from the wrong
-    one is wrong without ever looking wrong.
-    """
+def _read_input_devices():
+    # type: () -> list
+    """Every block of /proc/bus/input/devices, or an empty list."""
     text = read_attr(os.path.dirname(INPUT_DEVICES_PATH),
                      os.path.basename(INPUT_DEVICES_PATH))
     if text is None:
         return []
-    return [b for b in parse_input_devices(text) if b.get("name") == name]
+    return parse_input_devices(text)
+
+
+def _looks_like_the_pad(block, name):
+    # type: (dict, str) -> bool
+    """Whether this block is the gamepad function of a device.
+
+    hid-sony gives one controller three input devices, all sharing the
+    controller's Uniq: the pad itself, a touchpad and a motion sensor.
+    Grouping on Uniq alone would therefore call every run ambiguous, so
+    the group has to be narrowed to the gamepad function.
+
+    Two cheap signals, either of which is enough, and neither of which
+    needs the bit arithmetic that reading a capability mask would:
+
+    - the Name matches exactly, which is how the node is found in the
+      first place, or
+    - joydev bound a `js` handler to it. joydev binds joysticks; the
+      touchpad gets a `mouse` handler instead and the motion sensors get
+      neither.
+
+    The limitation is worth stating: if joydev is not loaded **and** the
+    Name differs between transports, a pad on Bluetooth and USB at once
+    would not be grouped, and the ambiguity guard would miss it. Whether
+    the Name does differ is unmeasured - see ROADMAP.md, "Names by
+    transport" - and the second signal is here because it probably does.
+    """
+    if block.get("name") == name:
+        return True
+    for handler in block.get("handlers") or []:
+        if _JS_HANDLER.match(handler):
+            return True
+    return False
+
+
+def find_gamepad(name, uniq=None):
+    # type: (str, str) -> tuple
+    """The gamepad's event devices, and which field identified them.
+
+    Identity is the **Uniq** field, which hid-sony sets to the
+    controller's Bluetooth address and which is the same on both
+    transports. The Name is not identity: it is a label, and it can
+    differ between transports for one physical controller.
+
+    That distinction is the whole point of the ambiguity guard. It has
+    to catch the same physical pad arriving over Bluetooth and USB at
+    once, because the two use different HID report layouts and a mapping
+    taken from the wrong one is wrong without ever looking wrong. A
+    guard that compared Names would be looking at the one field that is
+    allowed to differ.
+
+    Name remains the fallback for a device that reports no Uniq at all,
+    and it is always how the search starts, since there is nothing else
+    to seed it with. Which of the two was used is returned so the report
+    can say so rather than leaving the operator to guess.
+
+    Returns (candidates, identity_source, identity_value).
+    """
+    return select_gamepad(_read_input_devices(), name, uniq)
+
+
+def select_gamepad(blocks, name, uniq=None):
+    # type: (list, str, str) -> tuple
+    """The selection half of find_gamepad, with the file already read.
+
+    Split out so it can be exercised against fixtures. Reading /proc and
+    choosing between what is in it are separate jobs, and only the
+    second one has decisions in it worth checking.
+    """
+    blocks = [b for b in blocks if b.get("event")]
+
+    if uniq:
+        wanted = uniq.strip().lower()
+        chosen = [b for b in blocks
+                  if (b.get("uniq") or "").strip().lower() == wanted]
+        return chosen, "uniq", uniq
+
+    named = [b for b in blocks if b.get("name") == name]
+    seeds = [b for b in named if (b.get("uniq") or "").strip()]
+    if not seeds:
+        # No Uniq to identify it by. Fall back to the Name, and say so.
+        return named, "name", name
+
+    wanted = seeds[0]["uniq"].strip().lower()
+    same_device = [b for b in blocks
+                   if (b.get("uniq") or "").strip().lower() == wanted
+                   and _looks_like_the_pad(b, name)]
+    return same_device, "uniq", seeds[0]["uniq"]
 
 
 def transport_of(bus, phys):
@@ -867,34 +943,30 @@ class GamepadReader(object):
 
     # -- lifecycle ----------------------------------------------------
 
-    def open(self, name):
-        # type: (str) -> dict
+    def open(self, name, uniq=None):
+        # type: (str, str) -> dict
         """Find the pad, open it non-blocking, and start reading."""
         self.close()
 
-        matches = find_input_devices(name)
+        matches, id_source, id_value = find_gamepad(name, uniq)
         if not matches:
             raise CommandError(
-                "no input device named {0!r}. The pad is off, or it has "
-                "not reconnected: press PS".format(name),
+                "no gamepad found by {0} {1!r}. The pad is off, or it "
+                "has not reconnected: press PS".format(id_source, id_value),
                 "no_gamepad",
             )
         if len(matches) > 1:
             raise CommandError(
-                "{0} devices are named {1!r}: {2}. That is the same pad "
+                "{0} event devices share {1} {2!r}: {3}. That is one pad "
                 "on two transports at once, which use different HID "
-                "report layouts. Disconnect one and start again".format(
-                    len(matches), name, _describe_matches(matches)),
+                "report layouts, so a mapping taken from either would be "
+                "a guess about which. Disconnect one and start "
+                "again".format(len(matches), id_source, id_value,
+                               _describe_matches(matches)),
                 "ambiguous_gamepad",
             )
 
         device = matches[0]
-        if not device.get("event"):
-            raise CommandError(
-                "{0!r} has no event handler in its Handlers line: {1}"
-                .format(name, " ".join(device.get("handlers") or [])),
-                "no_gamepad",
-            )
         path = os.path.join(INPUT_DIR, device["event"])
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -943,6 +1015,8 @@ class GamepadReader(object):
             "abs_mask": device.get("abs_mask"),
             "transport": transport,
             "transport_agreement": agreement,
+            "identity_source": id_source,
+            "identity_value": id_value,
             "absinfo": dict(
                 (str(code), info) for code, info in absinfo.items()),
             "columns": list(GAMEPAD_STATE_COLUMNS),
@@ -1127,8 +1201,10 @@ def _describe_matches(matches):
     # type: (list) -> str
     parts = []
     for block in matches:
-        parts.append("{0} phys={1} bus={2}".format(
+        parts.append("{0} name={1!r} uniq={2} phys={3} bus={4}".format(
             block.get("event") or "?",
+            block.get("name") or "?",
+            block.get("uniq") or "-",
             block.get("phys") or "?",
             block.get("bus")))
     return "; ".join(parts)
@@ -1268,7 +1344,8 @@ def dispatch(command, control):
     if name == "stop_all":
         return control.stop_all()
     if name == "gamepad_open":
-        return GAMEPAD.open(command.get("name") or GAMEPAD_NAME)
+        return GAMEPAD.open(command.get("name") or GAMEPAD_NAME,
+                            command.get("uniq"))
     if name == "gamepad_state":
         return GAMEPAD.state()
     if name == "gamepad_reset_window":

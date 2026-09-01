@@ -10,11 +10,13 @@ Two ideas run through all of it.
 
 **Nothing is assigned that was not observed.** A step names an axis only
 because that axis was seen to move during that step. There is no table
-of DualShock axis numbers in this file, and the one place a published
-layout would be convenient - deciding which of the left stick's two axes
-is horizontal - returns None instead. A circular sweep genuinely does
-not carry that information, and a plausible guess in a file is worse
-than a blank, because the next phase will build on it.
+of DualShock axis numbers in this file. The place a published layout
+would be most convenient - deciding which of a stick's two axes is
+horizontal - is instead settled by asking the operator to push the stick
+one way and watching which axis moves, because a circular sweep drives
+both through their whole range and genuinely cannot say. The usual evdev
+polarity convention is recorded as agreeing or disagreeing with what was
+measured, and is never consulted to decide anything.
 
 **Every threshold is measured against something the driver said.** The
 80 percent test compares against the axis's own reported minimum and
@@ -101,6 +103,39 @@ STEPS = (
 # measured over events left from the connect step would be the pad
 # settling down, not the pad at rest.
 RESETTING_STEPS = (REST, LEFT, RIGHT, TRIGGER_L, TRIGGER_R, BUTTONS)
+
+# Sub-phases within a stick step. The circular sweep identifies which
+# pair of axes belongs to the stick, and that is all it can do: it drives
+# both axes through their whole range, so it cannot say which of the two
+# is horizontal. Two directional holds after it answer that, and they are
+# inside the step rather than steps of their own because they reuse the
+# pair the sweep just named.
+SWEEP = 0
+HOLD_RIGHT = 1
+HOLD_UP = 2
+
+STICK_PHASES = (SWEEP, HOLD_RIGHT, HOLD_UP)
+
+HOLD_SECONDS = 1.0
+
+# The axis being asked for must out-deflect the other by this much. A
+# diagonal push moves both, and an orientation taken from a diagonal is
+# a coin flip that the file would then present as a measurement.
+HOLD_RATIO = 3.0
+
+# ...and it must actually be pushed, not merely leaned on: at least this
+# far from rest toward the driver's limit. Without it, a hold where the
+# operator touched nothing would pass on noise, because near-zero is
+# still three times nearer-zero.
+HOLD_MIN_FRACTION = 0.5
+
+# Which way each hold pushes, and what a positive deviation therefore
+# means. The second and third entries are the answer for a deviation
+# that came out positive and negative respectively.
+HOLD_DIRECTIONS = {
+    HOLD_RIGHT: ("RIGHT", "right", "left", "horizontal"),
+    HOLD_UP: ("UP", "up", "down", "vertical"),
+}
 
 STICK_STEPS = {LEFT: "left_stick", RIGHT: "right_stick"}
 TRIGGER_STEPS = {TRIGGER_L: "l2", TRIGGER_R: "r2"}
@@ -371,6 +406,119 @@ def _clamp01(value):
 
 
 # ---------------------------------------------------------------------
+# The directional holds
+# ---------------------------------------------------------------------
+
+def deviation(entry, rest_mean):
+    """How far this axis got from rest during the window, with its sign.
+
+    The furthest excursion rather than the average, because the window
+    opens while the stick is still travelling and an average over the
+    journey understates where it arrived.
+    """
+    if entry is None or rest_mean is None:
+        return None
+    above = entry["max"] - rest_mean
+    below = entry["min"] - rest_mean
+    return above if abs(above) >= abs(below) else below
+
+
+def reach(value, rest_mean, low, high):
+    """A deviation as a fraction of the distance from rest to the limit.
+
+    Signed input, unsigned output: how much of the available travel in
+    whichever direction it went was actually used.
+    """
+    if value is None or rest_mean is None or low is None or high is None:
+        return 0.0
+    span = (high - rest_mean) if value >= 0 else (rest_mean - low)
+    if span <= 0:
+        return 0.0
+    return abs(value) / float(span)
+
+
+def resolve_hold(pair, codes, rest, drivers):
+    """Which of a stick's two axes the operator just pushed.
+
+    Returns a dict describing the outcome rather than a bare answer,
+    because the display has to show the operator the ratio being
+    satisfied while they are still holding, and the same numbers are
+    what the mapping file records.
+
+    `verdict` is one of:
+      ok        - one axis clearly moved and the other did not
+      diagonal  - both moved; the push was not along an axis
+      soft      - nothing moved far enough to be a deliberate push
+      unknown   - no rest measurement, so no deviation can be taken
+    """
+    if len(pair) != STICK_AXES_PER_STEP:
+        return {"verdict": "unknown", "deviations": {}, "ratio": None,
+                "chosen": None, "other": None, "reach": 0.0}
+
+    deviations = {}
+    for key in pair:
+        mean = rest.get(key, {}).get("mean")
+        deviations[key] = deviation(codes.get(key), mean)
+
+    if any(value is None for value in deviations.values()):
+        return {"verdict": "unknown", "deviations": deviations,
+                "ratio": None, "chosen": None, "other": None,
+                "reach": 0.0}
+
+    ordered = sorted(pair, key=lambda k: abs(deviations[k]), reverse=True)
+    chosen, other = ordered[0], ordered[1]
+    big, small = abs(deviations[chosen]), abs(deviations[other])
+
+    low, high, _ = axis_range(drivers.get(chosen), codes.get(chosen))
+    travelled = reach(deviations[chosen], rest.get(chosen, {}).get("mean"),
+                      low, high)
+
+    # Infinite rather than a division by zero: an untouched other axis
+    # is the cleanest possible result, not an error.
+    ratio = (big / small) if small > 0 else None
+
+    result = {"deviations": deviations, "chosen": chosen, "other": other,
+              "ratio": ratio, "reach": travelled}
+    if travelled < HOLD_MIN_FRACTION:
+        result["verdict"] = "soft"
+    elif ratio is not None and ratio < HOLD_RATIO:
+        result["verdict"] = "diagonal"
+    else:
+        result["verdict"] = "ok"
+    return result
+
+
+def hold_outcome(phase, outcome):
+    """The orientation and polarity one satisfied hold establishes.
+
+    Returns (chosen_key, orientation, positive_direction). The polarity
+    is read off the sign of the deviation: if pushing the stick right
+    made the axis go up, then up on that axis means right.
+    """
+    _, positive, negative, orientation = HOLD_DIRECTIONS[phase]
+    chosen = outcome["chosen"]
+    value = outcome["deviations"][chosen]
+    return chosen, orientation, (positive if value > 0 else negative)
+
+
+def matches_evdev_convention(orientation, positive_direction):
+    """Whether a measured polarity agrees with the usual evdev layout.
+
+    The convention is that X counts up to the right and Y counts up
+    downward - left is the minimum on X, up is the minimum on Y. It is
+    recorded because agreement or disagreement is itself a fact worth
+    having, and for no other purpose: nothing in this wizard consults it
+    to decide anything, and an axis is oriented by what the operator was
+    seen to do with it.
+    """
+    if orientation is None or positive_direction is None:
+        return None
+    if orientation == "horizontal":
+        return positive_direction == "right"
+    return positive_direction == "down"
+
+
+# ---------------------------------------------------------------------
 # The mapping document
 # ---------------------------------------------------------------------
 
@@ -381,18 +529,31 @@ DEADZONE_NOTE = (
     "driver_flat where that is present."
 ).format(DEADZONE_MULTIPLE)
 
-AXIS_ROLE_NOTE = (
-    "axis_role is null on every stick axis, deliberately. A full "
-    "circular sweep moves both of a stick's axes through their whole "
-    "range and therefore cannot say which of the two is horizontal. "
-    "Guessing from a published controller layout is exactly what this "
-    "wizard exists to avoid, so the pair is recorded as belonging to "
-    "the stick and the distinction is left unmeasured."
+ORIENTATION_NOTE = (
+    "orientation and positive_direction are measured, not assumed. The "
+    "circular sweep identifies which pair of axes a stick owns; it "
+    "cannot say which of the pair is horizontal, because it drives both "
+    "through their whole range. Two directional holds after the sweep "
+    "settle it: the operator pushes the stick right, then up, and the "
+    "axis that deflects further each time is the one named. "
+    "hold_deviations carries what both axes did during both holds, so "
+    "the decision can be checked rather than taken on trust."
+)
+
+EVDEV_CONVENTION_NOTE = (
+    "The usual evdev convention is that X counts up toward the right "
+    "and Y counts up downward, so left is the minimum on X and up is "
+    "the minimum on Y. matches_evdev_convention records whether this "
+    "controller agreed. It is a data point and nothing more: no part of "
+    "the capture consulted the convention to decide an orientation or a "
+    "polarity, and a false here means the controller differs, not that "
+    "the measurement is wrong."
 )
 
 
 def build_mapping(device, captured_at, assignments, rest, codes, drivers,
-                  buttons, declared_axes=()):
+                  buttons, declared_axes=(), orientation=None,
+                  polarity=None, hold_deviations=None):
     """The whole mapping document, ready to be written as JSON.
 
     `assignments` maps (type, code) to the control name a step decided
@@ -400,12 +561,17 @@ def build_mapping(device, captured_at, assignments, rest, codes, drivers,
     ever claimed; those carry a null control rather than being left out,
     so that a mapping with a gap in it looks like one.
     """
+    orientation = orientation or {}
+    polarity = polarity or {}
+    hold_deviations = hold_deviations or {}
+
     axis_records = []
     seen = set()
     for key, entry in axes(codes):
         seen.add(key[1])
         axis_records.append(_axis_record(
-            key, entry, assignments, rest, drivers))
+            key, entry, assignments, rest, drivers, orientation,
+            polarity, hold_deviations))
     for code in declared_axes:
         if code in seen:
             continue
@@ -417,13 +583,15 @@ def build_mapping(device, captured_at, assignments, rest, codes, drivers,
         "captured_at": captured_at,
         "device": device,
         "deadzone_note": DEADZONE_NOTE,
-        "axis_role_note": AXIS_ROLE_NOTE,
+        "orientation_note": ORIENTATION_NOTE,
+        "evdev_convention_note": EVDEV_CONVENTION_NOTE,
         "axes": axis_records,
         "buttons": [_button_record(item) for item in buttons],
     }
 
 
-def _axis_record(key, entry, assignments, rest, drivers):
+def _axis_record(key, entry, assignments, rest, drivers, orientation,
+                 polarity, hold_deviations):
     driver = drivers.get(key) or {}
     low, high, source = axis_range(driver, entry)
     rest_entry = rest.get(key, {})
@@ -432,7 +600,11 @@ def _axis_record(key, entry, assignments, rest, drivers):
         "code": key[1],
         "name": evdev_codes.code_name(key[0], key[1]),
         "control": assignments.get(key),
-        "axis_role": None,
+        "orientation": orientation.get(key),
+        "positive_direction": polarity.get(key),
+        "matches_evdev_convention": matches_evdev_convention(
+            orientation.get(key), polarity.get(key)),
+        "hold_deviations": hold_deviations.get(key),
         "observed_min": entry["min"],
         "observed_max": entry["max"],
         "rest_mean": _round(rest_entry.get("mean")),
@@ -462,7 +634,10 @@ def _missing_axis_record(code):
         "code": code,
         "name": evdev_codes.code_name(evdev_codes.EV_ABS, code),
         "control": None,
-        "axis_role": None,
+        "orientation": None,
+        "positive_direction": None,
+        "matches_evdev_convention": None,
+        "hold_deviations": None,
         "observed_min": None,
         "observed_max": None,
         "rest_mean": None,

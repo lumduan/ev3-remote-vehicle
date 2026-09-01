@@ -110,6 +110,9 @@ part of the fact, not context for it.
 
 | The axis mapping was captured over ____ and lives in `docs/gamepad-mapping.json` | `uv run ev3ctl gamepad` on ____-__-__ |
 | Which evdev axis each stick and trigger moves: ____ | The same run. Every assignment came from an observation made during a named step, never from a published layout |
+| Which axis of each stick is horizontal, and which polarity means right and up: ____ | The same run, the two directional holds inside steps 2 and 3. `hold_deviations` in the mapping file carries what both axes did during both holds |
+| This pad ____ the usual evdev polarity convention (X up to the right, Y up downward) | The same run. Recorded as a data point; nothing in the capture consulted it |
+| The pad's Name over USB is ____, against `Wireless Controller` over Bluetooth | `/proc/bus/input/devices` with the pad connected each way. See "Names by transport" |
 | Stick centres and resting drift, per axis: ____ | The same run, step 1. Measured over 3 s with both hands off |
 | L2 and R2 report ____ intermediate values, so proportional throttle is ____ | The same run, steps 4 and 5. An analog trigger delivered as a digital button would show only its two extremes |
 | The driver's own `flat` deadzone hint, per axis: ____, against the measured 3x-jitter suggestion of ____ | `EVIOCGABS` through the agent, reported in the same file |
@@ -763,13 +766,19 @@ rather than reporting at the end. It writes `docs/gamepad-mapping.json`.
 
 Three decisions in it are worth knowing before reading the code:
 
-- **The pad is matched on its exact name, never a substring.** hid-sony
-  creates three input devices for one controller, so a substring test
-  matches all three on every run, and the guard that refuses to proceed
-  on an ambiguous match would fire every time. With exact matching, a
-  second match means the pad is on Bluetooth and USB at once - which use
-  different HID report layouts - and the wizard then refuses, because a
-  mapping taken from the wrong one is wrong without looking wrong.
+- **Identity is the `Uniq` field, not the Name.** `Uniq` is the pad's
+  own Bluetooth address, and hid-sony sets it on both transports; the
+  Name is a label and may differ between them. The guard exists to catch
+  one physical pad arriving over Bluetooth and USB at once - they use
+  different HID report layouts, so a mapping taken from the wrong one is
+  wrong without looking wrong - and a guard comparing Names would be
+  watching the one field that is allowed to differ. The Name still seeds
+  the search, matched on equality and never as a substring, because
+  hid-sony's three devices for one controller all contain it. All three
+  also share the `Uniq`, so the group is narrowed to the gamepad
+  function by exact Name or by joydev having bound a `js` handler. Name
+  is the fallback when `Uniq` is empty, and the report says which was
+  used.
 - **"80 percent of the range" is measured against the driver's range**,
   read per axis with the `EVIOCGABS` ioctl, not against the range
   observed so far. Against an observed range the test is self-referential
@@ -777,11 +786,58 @@ Three decisions in it are worth knowing before reading the code:
   also excludes the D-pad from the stick steps on its own evidence: a hat
   declares a range of 2, which is too coarse to be a stick, so a brushed
   D-pad cannot be named as one.
-- **Which of a stick's two axes is horizontal is written as null.** A
-  full circular sweep moves both axes through their whole range and
-  therefore cannot distinguish them. That is left unmeasured rather than
-  filled in from a published layout, and it is the one thing a later
-  phase still has to measure before a mixer can use the file.
+- **Which of a stick's two axes is horizontal is measured by two holds.**
+  A full circular sweep moves both axes through their whole range and
+  therefore cannot distinguish them, so the sweep is followed - inside
+  the same step, reusing the pair it just named - by a prompt to push
+  the stick fully right and hold, and then fully up and hold. The axis
+  that deflects further from its step 1 rest mean is the one named, and
+  the sign of that deflection is the polarity. The intended axis must
+  out-deflect the other by three times; below that the push was a
+  diagonal, and the hold is refused and retried rather than accepted,
+  because an orientation taken from a diagonal is a coin flip that the
+  file would go on to present as a measurement. Pushing sideways again
+  during the up hold is refused for the same reason: it would name one
+  axis both horizontal and vertical and leave the other unnamed.
+- **The evdev polarity convention is recorded, never consulted.** X
+  counting up to the right and Y counting up downward is the usual
+  arrangement, and `matches_evdev_convention` says whether this pad
+  agreed. Nothing in the capture reads it. A `false` there means the
+  controller differs, not that the measurement is suspect.
+
+### Names by transport
+
+The ambiguity guard has to catch one physical gamepad appearing on
+Bluetooth and USB at the same time. It identifies the pad by `Uniq`
+rather than by Name precisely because the Name is expected to differ
+between the two transports, and `Uniq` is not.
+
+**That expectation is unverified.** The pad has only ever been seen over
+Bluetooth, where `/proc/bus/input/devices` reports
+`N: Name="Wireless Controller"` (`ROADMAP.md`, "Verified: the gamepad").
+What it reports over USB has not been read off this brick, and the USB
+string used in `tests/test_gamepad.py` is a stand-in chosen to make the
+differing-Name case testable, not an observation.
+
+Fill both rows in once the pad has been connected each way and
+`/proc/bus/input/devices` read:
+
+| Transport | `N: Name=` | `U: Uniq=` | `I: Bus=` |
+| --- | --- | --- | --- |
+| Bluetooth | `Wireless Controller` | `00:22:68:f2:5c:b6` | `0005` |
+| USB | ____ | ____ | ____ |
+
+If the two Names turn out to be identical, the Name-based guard would
+have sufficed and `Uniq` is merely the better key. If they differ, the
+Name-based guard would have missed the case outright, and this row is
+the evidence for why identity moved.
+
+One limitation follows from how the group is narrowed. A device is taken
+to be the gamepad function of a controller if its Name matches exactly
+**or** joydev has bound it a `js` handler. If joydev is not loaded *and*
+the Names differ, the two transports would not be grouped and the guard
+would miss them. Whether joydev is loaded on this brick is also
+unverified.
 
 The arithmetic - the parser, the advance gates, the rest statistics, the
 16-byte `input_event` decode and the analog-versus-digital trigger test -

@@ -110,9 +110,15 @@ def _add_gamepad(subparsers, common):
     )
     parser.add_argument(
         "--name", metavar="NAME",
-        help="exact input device name to match. Exact, never a "
-             "substring: hid-sony creates three devices for one pad "
-             "(default: Wireless Controller)",
+        help="exact input device name to seed the search with. Exact, "
+             "never a substring: hid-sony creates three devices for one "
+             "pad (default: Wireless Controller)",
+    )
+    parser.add_argument(
+        "--uniq", metavar="ADDRESS",
+        help="identify the pad by its Uniq field, its own Bluetooth "
+             "address, instead of searching by name. Uniq is the same "
+             "on Bluetooth and USB; the Name need not be",
     )
     return parser
 

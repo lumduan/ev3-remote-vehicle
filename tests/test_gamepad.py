@@ -70,9 +70,11 @@ H: Handlers=event6
 B: ABS=7fff000000000000
 '''
 
-# The same pad arriving over Bluetooth and USB at once. Requirement: two
-# exact-name matches must refuse to proceed, because the two transports
-# use different HID report layouts.
+# One pad on Bluetooth and USB at once, with the Name differing between
+# the transports and the Uniq the same. That is the case identity by
+# Uniq exists for: the guard has to catch this, and a Name comparison
+# would not. The exact USB Name string is a hypothesis until both
+# transports have been seen - see ROADMAP.md, "Names by transport".
 TWO_TRANSPORTS = '''\
 I: Bus=0005 Vendor=054c Product=09cc Version=8100
 N: Name="Wireless Controller"
@@ -82,9 +84,9 @@ H: Handlers=event4 js0
 B: ABS=3003f
 
 I: Bus=0003 Vendor=054c Product=09cc Version=8111
-N: Name="Wireless Controller"
+N: Name="Sony Interactive Entertainment Wireless Controller"
 P: Phys=usb-ohci-omap3.1-1.2/input0
-U: Uniq=
+U: Uniq=00:22:68:f2:5c:b6
 H: Handlers=event7 js1
 B: ABS=3003f
 '''
@@ -116,12 +118,76 @@ def test_exact_name_match_finds_one_of_the_three(agent):
     assert len(substring) == 3
 
 
-def test_two_transports_is_two_exact_matches(agent):
-    """The case the ambiguity guard exists for still trips it."""
+# ---------------------------------------------------------------------
+# Identity: Uniq, with Name as the fallback
+# ---------------------------------------------------------------------
+
+def select(agent, text, name="Wireless Controller", uniq=None):
+    blocks = agent["parse_input_devices"](text)
+    return agent["select_gamepad"](blocks, name, uniq)
+
+
+def test_identity_uses_uniq_when_the_device_reports_one(agent):
+    chosen, source, value = select(agent, THREE_DEVICES)
+    assert source == "uniq"
+    assert value == "00:22:68:f2:5c:b6"
+    assert len(chosen) == 1
+    assert chosen[0]["event"] == "event4"
+
+
+def test_the_siblings_sharing_that_uniq_are_not_candidates(agent):
+    """All three of hid-sony's devices carry the same Uniq.
+
+    Grouping on Uniq alone would call every run ambiguous, so the group
+    is narrowed to the gamepad function - by exact Name, or by joydev
+    having bound a js handler. The touchpad gets a mouse handler and the
+    motion sensors get neither.
+    """
+    chosen, _, _ = select(agent, THREE_DEVICES)
+    names = [b["name"] for b in chosen]
+    assert names == ["Wireless Controller"]
+
+
+def test_two_transports_are_caught_even_when_the_names_differ(agent):
+    """The reason identity is Uniq and not Name.
+
+    A Name comparison finds one device here and would let the wizard
+    proceed against whichever transport it happened to pick. The two use
+    different HID report layouts, so that mapping would be wrong without
+    ever looking wrong.
+    """
     blocks = agent["parse_input_devices"](TWO_TRANSPORTS)
-    exact = [b for b in blocks if b["name"] == "Wireless Controller"]
-    assert len(exact) == 2
-    assert {b["bus"] for b in exact} == {0x05, 0x03}
+    by_name = [b for b in blocks if b["name"] == "Wireless Controller"]
+    assert len(by_name) == 1, "a Name comparison sees only one"
+
+    chosen, source, value = select(agent, TWO_TRANSPORTS)
+    assert source == "uniq"
+    assert len(chosen) == 2, "identity by Uniq sees both"
+    assert {b["bus"] for b in chosen} == {0x05, 0x03}
+
+
+def test_name_is_the_fallback_when_uniq_is_empty(agent):
+    text = TWO_TRANSPORTS.replace("U: Uniq=00:22:68:f2:5c:b6", "U: Uniq=")
+    chosen, source, value = select(agent, text)
+    assert source == "name"
+    assert value == "Wireless Controller"
+    assert len(chosen) == 1
+
+
+def test_an_explicit_uniq_skips_the_name_search_entirely(agent):
+    chosen, source, value = select(
+        agent, THREE_DEVICES, name="something else",
+        uniq="00:22:68:F2:5C:B6")
+    assert source == "uniq"
+    # Case-insensitive: bluetoothctl prints the address upper-case and
+    # /proc prints it lower-case, for the same controller.
+    assert len(chosen) == 3
+
+
+def test_a_device_with_no_event_node_is_never_a_candidate(agent):
+    text = 'N: Name="Wireless Controller"\nU: Uniq=aa\nH: Handlers=js0\n'
+    chosen, _, _ = select(agent, text)
+    assert chosen == []
 
 
 def test_fields_are_read_off_the_block(agent):
@@ -585,12 +651,20 @@ def build():
                    (3, 2): "l2"}
     buttons = [(evdev_codes.EV_KEY, 0x130, "Cross", 1),
                (evdev_codes.EV_ABS, 0x11, "D-pad up", -1)]
+    orientation = {(3, 0): "horizontal", (3, 1): "vertical"}
+    polarity = {(3, 0): "right", (3, 1): "down"}
+    hold_deviations = {
+        (3, 0): {"right_hold": 122.0, "up_hold": 1.0},
+        (3, 1): {"right_hold": 2.0, "up_hold": -124.0},
+    }
     return gamepad.build_mapping(
         device={"name": "Wireless Controller", "transport": "bluetooth",
-                "uniq": "00:22:68:f2:5c:b6"},
+                "uniq": "00:22:68:f2:5c:b6", "identity_source": "uniq"},
         captured_at="2026-09-01T12:00:00+07:00",
         assignments=assignments, rest=rest, codes=codes, drivers=drivers,
-        buttons=buttons, declared_axes=[0, 1, 2, 3, 4, 5, 16, 17])
+        buttons=buttons, declared_axes=[0, 1, 2, 3, 4, 5, 16, 17],
+        orientation=orientation, polarity=polarity,
+        hold_deviations=hold_deviations)
 
 
 def test_every_declared_axis_appears():
@@ -617,12 +691,24 @@ def test_an_unswept_axis_is_null_rather_than_guessed():
     assert unseen["rest_mean"] is None
 
 
-def test_stick_axes_do_not_claim_to_know_which_is_horizontal():
+def test_stick_axes_carry_a_measured_orientation_and_polarity():
+    """What the circular sweep could not say, the holds now do."""
     document = build()
-    for axis in document["axes"]:
-        assert axis["axis_role"] is None
-    assert "cannot say which of the two is horizontal" in \
-        document["axis_role_note"]
+    for code in (0, 1):
+        axis = [a for a in document["axes"] if a["code"] == code][0]
+        assert axis["orientation"] in ("horizontal", "vertical")
+        assert axis["positive_direction"] in ("right", "left", "up",
+                                              "down")
+    assert "axis_role" not in document
+    assert "axis_role_note" not in document
+    assert "measured, not assumed" in document["orientation_note"]
+
+
+def test_an_axis_no_hold_named_still_carries_no_orientation():
+    document = build()
+    trigger = [a for a in document["axes"] if a["code"] == 2][0]
+    assert trigger["orientation"] is None
+    assert trigger["positive_direction"] is None
 
 
 def test_the_deadzone_note_says_it_is_not_a_tuned_value():
@@ -772,3 +858,288 @@ def test_a_step_is_not_judged_until_its_reset_is_acknowledged(tmp_path):
     wiz.handle_response({"id": wiz.reset_id, "ok": True,
                          "result": {"reset": True}})
     assert wiz.armed is True
+
+
+# ---------------------------------------------------------------------
+# The directional holds
+# ---------------------------------------------------------------------
+
+PAIR = ((3, 0), (3, 1))
+REST_CENTRED = {(3, 0): {"mean": 128.0, "spread": 3},
+                (3, 1): {"mean": 128.0, "spread": 2}}
+DRIVERS_STICK = {(3, 0): STICK, (3, 1): STICK}
+
+
+def held(x_min, x_max, y_min, y_max):
+    """A window in which the stick was pushed and held somewhere."""
+    return gamepad.rows_to_codes([
+        row(3, 0, x_max, x_min, x_max, count=5),
+        row(3, 1, y_max, y_min, y_max, count=5),
+    ])
+
+
+def test_deviation_is_the_furthest_excursion_with_its_sign():
+    entry = gamepad.rows_to_codes([row(3, 0, 250, 126, 250)])[(3, 0)]
+    assert gamepad.deviation(entry, 128.0) == 122.0
+    entry = gamepad.rows_to_codes([row(3, 0, 4, 4, 130)])[(3, 0)]
+    assert gamepad.deviation(entry, 128.0) == -124.0
+
+
+def test_a_clean_push_right_names_the_horizontal_axis():
+    codes = held(128, 250, 126, 130)
+    outcome = gamepad.resolve_hold(PAIR, codes, REST_CENTRED,
+                                   DRIVERS_STICK)
+    assert outcome["verdict"] == "ok"
+    assert outcome["chosen"] == (3, 0)
+    key, orientation, direction = gamepad.hold_outcome(
+        gamepad.HOLD_RIGHT, outcome)
+    assert (key, orientation, direction) == ((3, 0), "horizontal", "right")
+
+
+def test_polarity_follows_the_sign_and_is_not_assumed():
+    """A controller whose X counts up to the left is recorded that way."""
+    codes = held(6, 128, 126, 130)
+    outcome = gamepad.resolve_hold(PAIR, codes, REST_CENTRED,
+                                   DRIVERS_STICK)
+    assert outcome["verdict"] == "ok"
+    key, orientation, direction = gamepad.hold_outcome(
+        gamepad.HOLD_RIGHT, outcome)
+    assert (orientation, direction) == ("horizontal", "left")
+
+
+def test_up_names_the_vertical_axis_and_the_direction_measured():
+    """Pushing up drove Y down, so positive Y means down on this pad.
+
+    That is the usual evdev convention, and the wizard arrives at it by
+    watching rather than by knowing it. A controller wired the other way
+    would come out of the same code as "up" and be recorded as such.
+    """
+    codes = held(126, 130, 4, 128)
+    outcome = gamepad.resolve_hold(PAIR, codes, REST_CENTRED,
+                                   DRIVERS_STICK)
+    key, orientation, direction = gamepad.hold_outcome(
+        gamepad.HOLD_UP, outcome)
+    assert (key, orientation, direction) == ((3, 1), "vertical", "down")
+    assert gamepad.matches_evdev_convention(orientation, direction) is True
+
+
+def test_a_pad_that_counts_the_other_way_is_recorded_that_way():
+    codes = held(126, 130, 128, 252)
+    outcome = gamepad.resolve_hold(PAIR, codes, REST_CENTRED,
+                                   DRIVERS_STICK)
+    _, orientation, direction = gamepad.hold_outcome(
+        gamepad.HOLD_UP, outcome)
+    assert direction == "up"
+    assert gamepad.matches_evdev_convention(orientation, direction) is False
+
+
+def test_a_diagonal_push_is_rejected():
+    """Both axes moved a similar amount, so neither can be named.
+
+    Accepting this would put a coin flip in the file and present it as a
+    measurement, which is the failure the whole wizard exists to avoid.
+    """
+    codes = held(128, 250, 128, 240)
+    outcome = gamepad.resolve_hold(PAIR, codes, REST_CENTRED,
+                                   DRIVERS_STICK)
+    assert outcome["verdict"] == "diagonal"
+    assert outcome["ratio"] < gamepad.HOLD_RATIO
+
+
+def test_exactly_three_times_is_accepted_and_just_under_is_not():
+    rest = {(3, 0): {"mean": 0.0}, (3, 1): {"mean": 0.0}}
+    drivers = {(3, 0): TRIGGER, (3, 1): TRIGGER}
+    at = gamepad.resolve_hold(
+        PAIR, held(0, 150, 0, 50), rest, drivers)
+    assert at["ratio"] == pytest.approx(3.0)
+    assert at["verdict"] == "ok"
+    under = gamepad.resolve_hold(
+        PAIR, held(0, 150, 0, 51), rest, drivers)
+    assert under["verdict"] == "diagonal"
+
+
+def test_an_untouched_other_axis_is_the_cleanest_result_not_an_error():
+    """Ratio is undefined, not zero, and must not divide by zero."""
+    codes = held(128, 250, 128, 128)
+    outcome = gamepad.resolve_hold(PAIR, codes, REST_CENTRED,
+                                   DRIVERS_STICK)
+    assert outcome["ratio"] is None
+    assert outcome["verdict"] == "ok"
+
+
+def test_a_stick_barely_moved_is_soft_not_a_clean_lead():
+    """Near-zero is still three times nearer-zero.
+
+    Without a floor on how far the intended axis travelled, a hold in
+    which the operator touched nothing would pass on noise alone.
+    """
+    codes = held(128, 134, 128, 129)
+    outcome = gamepad.resolve_hold(PAIR, codes, REST_CENTRED,
+                                   DRIVERS_STICK)
+    assert outcome["verdict"] == "soft"
+
+
+def test_no_rest_measurement_means_no_verdict():
+    outcome = gamepad.resolve_hold(
+        PAIR, held(128, 250, 126, 130), {}, DRIVERS_STICK)
+    assert outcome["verdict"] == "unknown"
+
+
+def test_reach_is_measured_against_the_driver_limit():
+    assert gamepad.reach(127.0, 128.0, 0, 255) == pytest.approx(1.0)
+    assert gamepad.reach(-64.0, 128.0, 0, 255) == pytest.approx(0.5)
+    assert gamepad.reach(None, 128.0, 0, 255) == 0.0
+
+
+def test_the_evdev_convention_is_recorded_not_consulted():
+    """X up to the right, Y up downward. A data point, nothing more."""
+    assert gamepad.matches_evdev_convention("horizontal", "right") is True
+    assert gamepad.matches_evdev_convention("horizontal", "left") is False
+    assert gamepad.matches_evdev_convention("vertical", "down") is True
+    assert gamepad.matches_evdev_convention("vertical", "up") is False
+    assert gamepad.matches_evdev_convention(None, None) is None
+
+
+def test_the_mapping_records_agreement_with_the_convention():
+    document = build()
+    x = [a for a in document["axes"] if a["code"] == 0][0]
+    y = [a for a in document["axes"] if a["code"] == 1][0]
+    assert x["matches_evdev_convention"] is True
+    assert y["matches_evdev_convention"] is True
+    assert "data point and nothing more" in \
+        document["evdev_convention_note"]
+
+
+def test_hold_deviations_are_kept_so_the_decision_can_be_rechecked():
+    document = build()
+    x = [a for a in document["axes"] if a["code"] == 0][0]
+    assert x["hold_deviations"] == {"right_hold": 122.0, "up_hold": 1.0}
+
+
+# ---------------------------------------------------------------------
+# The holds inside the step machine
+# ---------------------------------------------------------------------
+
+DEVICE = {
+    "name": "Wireless Controller", "transport": "bluetooth",
+    "transport_agreement": "agree", "bus": 0x05,
+    "phys": "00:17:ec:ed:46:29", "uniq": "00:22:68:f2:5c:b6",
+    "identity_source": "uniq", "identity_value": "00:22:68:f2:5c:b6",
+    "event": "event4", "path": "/dev/input/event4", "abs_mask": "3003f",
+    "absinfo": {"0": STICK, "1": STICK},
+    "columns": list(gamepad.STATE_COLUMNS),
+}
+
+
+def at_left_sweep(tmp_path):
+    """A wizard sitting at step 2, rest measured, ready to sweep."""
+    from ev3ctl.cli.gamepad import Wizard
+    session = FakeSession()
+    wiz = Wizard(session, str(tmp_path / "m.json"))
+    wiz.session = session
+    wiz.tick(1000.0)
+    wiz.handle_response({"id": session.sent[-1][0], "ok": True,
+                         "result": DEVICE})
+    _ack_reset(wiz)
+    _deliver(wiz, session, [row(3, 0, 128, 126, 131, 4, 514),
+                            row(3, 1, 128, 126, 130, 4, 512)])
+    wiz.tick(1000.0)
+    wiz.tick(1004.0)
+    _ack_reset(wiz)
+    return session, wiz
+
+
+def _ack_reset(wiz):
+    wiz.handle_response({"id": wiz.reset_id, "ok": True,
+                         "result": {"reset": True}})
+
+
+def _deliver(wiz, session, rows):
+    request_id = wiz.track(session.send_gamepad_state(), "state")
+    wiz.handle_response({"id": request_id, "ok": True, "result": {
+        "present": True, "device_gone": False, "total_events": 50,
+        "rows": rows}})
+
+
+def test_a_sweep_no_longer_advances_the_step(tmp_path):
+    """It moves to the hold that answers what the sweep cannot."""
+    session, wiz = at_left_sweep(tmp_path)
+    _deliver(wiz, session, [row(3, 0, 128, 2, 253),
+                            row(3, 1, 128, 3, 250)])
+    wiz.tick(1004.0)
+    assert wiz.step == gamepad.LEFT
+    assert wiz.phase == gamepad.HOLD_RIGHT
+    assert set(wiz.step_axes[gamepad.LEFT]) == {(3, 0), (3, 1)}
+    assert "RIGHT" in wiz.instruction()
+
+
+def test_a_clean_hold_names_the_axis_and_moves_to_the_second_hold(tmp_path):
+    session, wiz = at_left_sweep(tmp_path)
+    _deliver(wiz, session, [row(3, 0, 128, 2, 253),
+                            row(3, 1, 128, 3, 250)])
+    wiz.tick(1004.0)
+    _ack_reset(wiz)
+    _deliver(wiz, session, [row(3, 0, 250, 128, 250),
+                            row(3, 1, 129, 127, 130)])
+    wiz.tick(1004.0)
+    wiz.tick(1005.2)
+    assert wiz.phase == gamepad.HOLD_UP
+    assert wiz.orientation[(3, 0)] == "horizontal"
+    assert wiz.polarity[(3, 0)] == "right"
+
+
+def test_a_diagonal_is_retried_without_losing_the_sweep(tmp_path):
+    """The pair was measured properly; only the push needs redoing."""
+    session, wiz = at_left_sweep(tmp_path)
+    _deliver(wiz, session, [row(3, 0, 128, 2, 253),
+                            row(3, 1, 128, 3, 250)])
+    wiz.tick(1004.0)
+    _ack_reset(wiz)
+    _deliver(wiz, session, [row(3, 0, 250, 128, 250),
+                            row(3, 1, 240, 128, 240)])
+    wiz.tick(1004.0)
+    wiz.tick(1005.2)
+    assert wiz.phase == gamepad.HOLD_RIGHT
+    assert wiz.step_axes[gamepad.LEFT], "the sweep result survives"
+    assert wiz.orientation == {}
+    assert "diagonal" in wiz.last_error
+
+
+def test_pushing_sideways_again_during_the_up_hold_is_refused(tmp_path):
+    """Otherwise one axis would be named horizontal and vertical both.
+
+    Naming it twice would also leave the other axis of the pair with no
+    orientation at all, so the file would contradict itself and have a
+    hole in it.
+    """
+    session, wiz = at_left_sweep(tmp_path)
+    _deliver(wiz, session, [row(3, 0, 128, 2, 253),
+                            row(3, 1, 128, 3, 250)])
+    wiz.tick(1004.0)
+    _ack_reset(wiz)
+    _deliver(wiz, session, [row(3, 0, 250, 128, 250),
+                            row(3, 1, 129, 127, 130)])
+    wiz.tick(1004.0)
+    wiz.tick(1005.2)
+    assert wiz.phase == gamepad.HOLD_UP
+
+    _ack_reset(wiz)
+    _deliver(wiz, session, [row(3, 0, 4, 4, 128),
+                            row(3, 1, 129, 127, 130)])
+    wiz.tick(1005.2)
+    wiz.tick(1006.4)
+    assert wiz.phase == gamepad.HOLD_UP
+    assert (3, 1) not in wiz.orientation
+    assert wiz.orientation[(3, 0)] == "horizontal"
+
+
+def test_redo_inside_a_hold_keeps_the_sweep(tmp_path):
+    session, wiz = at_left_sweep(tmp_path)
+    _deliver(wiz, session, [row(3, 0, 128, 2, 253),
+                            row(3, 1, 128, 3, 250)])
+    wiz.tick(1004.0)
+    pair = dict(wiz.step_axes)
+    wiz.handle_key("r")
+    assert wiz.step_axes == pair
+    assert wiz.phase == gamepad.HOLD_RIGHT
+    assert wiz.armed is False, "a redo re-opens the window"

@@ -447,8 +447,8 @@ def gamepad_header(wizard):
                      + text(device.get("event")) + "[/dim]")
         grid.add_row("transport", _transport_markup(device))
         grid.add_row("ids", "[dim]phys[/dim] " + text(device.get("phys"))
-                     + "   [dim]uniq[/dim] " + text(device.get("uniq"))
                      + "   [dim]bus[/dim] " + _bus_markup(device))
+        grid.add_row("identity", _identity_markup(device))
     else:
         grid.add_row("device", "[warn]waiting[/warn]")
     grid.add_row("steps", _step_ladder(wizard))
@@ -456,6 +456,24 @@ def gamepad_header(wizard):
                  + str(wizard.total_events))
     return Panel(grid, title="ev3ctl gamepad", title_align="left",
                  padding=(0, 1))
+
+
+def _identity_markup(device):
+    """Which field identified the pad, and what it said.
+
+    Worth its own row rather than being folded in with the other ids.
+    Identity decides whether two event devices are one physical
+    controller, and Uniq is the field that answers that on either
+    transport - the Name is a label and may differ between them.
+    """
+    source = device.get("identity_source")
+    value = device.get("identity_value")
+    if source == "uniq":
+        return "[ok]Uniq[/ok] " + text(value)
+    if source == "name":
+        return ("[warn]Name[/warn] " + text(value)
+                + "  [dim]no Uniq reported; fallback[/dim]")
+    return "[warn]not reported[/warn]"
 
 
 def _bus_markup(device):
@@ -566,6 +584,55 @@ def _sweep_bars(entry, rest_mean, low, high):
     return _bar(down), _bar(up)
 
 
+def gamepad_hold_table(wizard):
+    """Both axes' live deviation, and the ratio between them.
+
+    The operator has to be able to see the ratio being satisfied while
+    they are still holding the stick. A hold that reports only its
+    verdict afterwards leaves them guessing whether they pushed
+    diagonally or simply not far enough.
+    """
+    outcome = wizard.live_hold()
+    pushed = gamepad.HOLD_DIRECTIONS[wizard.phase][0]
+    table = Table(
+        title="Deflection while held " + pushed, title_justify="left",
+        header_style="head", expand=True, padding=(0, 1),
+    )
+    table.add_column("Axis", min_width=12)
+    table.add_column("Now", justify="right", width=8)
+    table.add_column("Rest", justify="right", width=8)
+    table.add_column("Deviation", justify="right", width=10)
+    table.add_column("Reach", width=BAR_WIDTH + 2)
+    table.add_column("Verdict", min_width=18)
+
+    if outcome is None:
+        table.add_row("[empty]no axis pair yet[/empty]", DASH, DASH,
+                      DASH, DASH, DASH)
+        return table
+
+    chosen = outcome["chosen"]
+    for key in sorted(outcome["deviations"]):
+        value = outcome["deviations"][key]
+        entry = wizard.codes.get(key) or {}
+        rest_mean = wizard.rest.get(key, {}).get("mean")
+        low, high, _ = gamepad.axis_range(
+            wizard.drivers.get(key), entry)
+        travelled = gamepad.reach(value, rest_mean, low, high)
+        if key == chosen:
+            verdict = "[ok]larger[/ok]"
+        else:
+            verdict = "[dim]should stay near rest[/dim]"
+        table.add_row(
+            _axis_label(key),
+            number(entry.get("latest")),
+            number(rest_mean, 1),
+            ("{0:+.0f}".format(value) if value is not None else DASH),
+            _bar(travelled / gamepad.HOLD_MIN_FRACTION),
+            verdict,
+        )
+    return table
+
+
 def gamepad_footer(wizard):
     grid = Table.grid(padding=(0, 1))
     grid.add_column()
@@ -585,6 +652,28 @@ def gamepad_footer(wizard):
     return Panel(grid, padding=(0, 1))
 
 
+def _hold_condition(wizard):
+    """How close a directional hold is to being decided."""
+    outcome = wizard.live_hold()
+    pushed = gamepad.HOLD_DIRECTIONS[wizard.phase][0]
+    held = _bar(wizard.hold_progress(time.monotonic()))
+    if outcome is None or outcome["chosen"] is None:
+        return ("[dim]advances when[/dim] one axis clearly leads, held "
+                "for {0:.0f}s {1}".format(gamepad.HOLD_SECONDS, held))
+    ratio = outcome["ratio"]
+    if ratio is None:
+        shown = "[ok]clear[/ok]"
+    elif ratio >= gamepad.HOLD_RATIO:
+        shown = "[ok]{0:.1f}x[/ok]".format(ratio)
+    else:
+        shown = "[warn]{0:.1f}x[/warn]".format(ratio)
+    return ("[dim]advances when[/dim] the {0} axis leads by {1:.0f}x and "
+            "is held {2:.0f}s   [dim]now[/dim] {3} on "
+            "[head]{4}[/head]   {5}".format(
+                pushed.lower(), gamepad.HOLD_RATIO, gamepad.HOLD_SECONDS,
+                shown, _axis_label(outcome["chosen"]), held))
+
+
 def _condition(wizard):
     """The advance condition, and how close this step is to meeting it."""
     step = wizard.step
@@ -602,6 +691,8 @@ def _condition(wizard):
         return ("[dim]advances after[/dim] {0:.0f}s of continuous data "
                 "{1}".format(gamepad.REST_SECONDS,
                              _bar(wizard.rest_progress(time.monotonic()))))
+    if step in gamepad.STICK_STEPS and wizard.phase != gamepad.SWEEP:
+        return _hold_condition(wizard)
     if step in gamepad.STICK_STEPS:
         found = gamepad.qualifying_axes(
             wizard.codes, wizard.drivers, wizard.rest)
@@ -641,11 +732,16 @@ def _condition(wizard):
 
 def gamepad_dashboard(wizard):
     layout = Layout()
-    layout.split_column(
+    panes = [
         Layout(gamepad_header(wizard), name="header", size=10),
         Layout(gamepad_codes_table(wizard), name="codes"),
-        Layout(gamepad_footer(wizard), name="footer", size=7),
-    )
+    ]
+    if (wizard.step in gamepad.STICK_STEPS
+            and wizard.phase != gamepad.SWEEP):
+        panes.append(
+            Layout(gamepad_hold_table(wizard), name="hold", size=7))
+    panes.append(Layout(gamepad_footer(wizard), name="footer", size=7))
+    layout.split_column(*panes)
     return layout
 
 
@@ -659,6 +755,8 @@ def gamepad_summary_table(wizard):
     table.add_column("Axis", min_width=12)
     table.add_column("Code", justify="right", width=5)
     table.add_column("Control", min_width=12)
+    table.add_column("Axis", width=11)
+    table.add_column("+ means", width=8)
     table.add_column("Min", justify="right", width=7)
     table.add_column("Max", justify="right", width=7)
     table.add_column("Rest", justify="right", width=8)
@@ -677,10 +775,16 @@ def gamepad_summary_table(wizard):
             control += " [ok]analog[/ok]"
         elif record.get("continuous") == "few":
             control += " [warn]few steps[/warn]"
+        orientation = record["orientation"]
+        direction = record["positive_direction"]
+        if orientation is None and record["control"]:
+            orientation = "[warn]unmeasured[/warn]"
         table.add_row(
             text(record["name"]),
             str(record["code"]),
             control,
+            text(orientation),
+            text(direction),
             number(record["observed_min"]),
             number(record["observed_max"]),
             number(record["rest_mean"], 1),

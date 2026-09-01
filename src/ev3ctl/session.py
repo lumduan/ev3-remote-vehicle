@@ -106,7 +106,7 @@ class Session(object):
     # answer decides what it shows next. Only the state poll is sent
     # without waiting, because that one runs five times a second.
 
-    def send_gamepad_open(self, name=None):
+    def send_gamepad_open(self, name=None, uniq=None):
         """Ask for the pad without waiting.
 
         Step 0 of the wizard retries this until the operator presses PS,
@@ -114,7 +114,11 @@ class Session(object):
         would freeze the display for eight seconds at exactly the moment
         the operator is watching it for a sign of life.
         """
-        fields = {"name": name} if name else {}
+        fields = {}
+        if name:
+            fields["name"] = name
+        if uniq:
+            fields["uniq"] = uniq
         return self.link.send("gamepad_open", **fields)
 
     def send_gamepad_reset_window(self):
