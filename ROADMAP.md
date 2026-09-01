@@ -81,6 +81,54 @@ the failure the "never invent a hardware fact" rule exists to prevent,
 and it survived every test written before the brick was plugged in,
 because the fake sysfs tree had been built from the same assumption.
 
+### Verified: the gamepad
+
+Read off the hardware on **2026-09-01**, over the USB link, by SSH. These
+hold for **BlueZ 5.43-2+deb9u2** on kernel **4.14.117-ev3dev-2.3.5-ev3**.
+A different kernel could bind a different driver, so the versions are
+part of the fact, not context for it.
+
+| Fact | Where it came from |
+| --- | --- |
+| The gamepad is `00:22:68:F2:5C:B6`, `Wireless Controller`, class `0x002508`, icon `input-gaming` | `bluetoothctl info` on the brick |
+| Its `Modalias` is `usb:v054Cp09CCd0100`. Vendor `0x054C` is Sony, so it is genuine; product `0x09CC` makes it a **CUH-ZCT2**, the 2016 revision | The same `info` output. Read from the PnP Information record, not from the packaging |
+| It advertises exactly two UUIDs: **Human Interface Device `0x1124`** and PnP Information `0x1200` | The same `info` output |
+| **`hid-sony` binds it.** `sony 0005:054C:09CC.0004: input,hidraw0: BLUETOOTH HID v81.00 Gamepad [Wireless Controller] on 00:17:ec:ed:46:29` | `dmesg` on the brick. No `hid-generic` line appears anywhere in a buffer that ran unbroken from boot. **This resolves the open question this phase was blocked on** |
+| hid-sony creates **three** input devices for one controller: `Wireless Controller`, `Wireless Controller Touchpad` and `Wireless Controller Motion Sensors` | `dmesg` and `/proc/bus/input/devices`. Decoding the bitmask of the wrong one would give a confidently wrong answer, so the pad must be matched on its exact name |
+| The pad's evdev node is `/dev/input/event4`, `Uniq=00:22:68:f2:5c:b6`, `Bus=0005 Vendor=054c Product=09cc Version=8100` | `/proc/bus/input/devices` |
+| **`B: ABS=3003f`**, so `ABS_X`, `ABS_Y`, `ABS_Z`, `ABS_RX`, `ABS_RY`, `ABS_RZ`, `ABS_HAT0X` and `ABS_HAT0Y` all exist. **`ABS_Z` and `ABS_RZ` are present**, which is the evidence that L2 and R2 report as analog axes, and therefore that the controller sends the full 78-byte report `0x11` rather than the 10-byte `0x01` | `/proc/bus/input/devices`. Bits 0-5 and 16-17 of the mask |
+| `/dev/input/by-id/` **does not exist on this brick**, so there is no `-event-joystick` symlink to open. `/dev/input/by-path/` holds only the two built-in devices. Code must find the pad by name in `/proc/bus/input/devices`, not by a stable path | `ls` on the brick |
+| **The `trust` flag works.** One press of PS reconnected the gamepad with no host-side action at all. That is a hard requirement for standalone operation, where there is no computer present to initiate anything | Observed 2026-09-01 by the operator |
+| The Bluetooth radio is **rfkill soft-blocked at boot**, because ConnMan's bluetooth technology reads `Powered = False`. `bluetoothctl power on` fails with `org.bluez.Error.Blocked` until `connmanctl enable bluetooth` clears it, and neither step needs root | `/sys/class/rfkill/rfkill0/soft` went 1 to 0 and `hciconfig hci0` went `DOWN` to `UP RUNNING PSCAN` |
+| A power supply's `scope` is what separates the brick's pack from a peripheral's: the brick reads `System` and offers `voltage_now` but no `capacity`, while a battery inside an attached device reads `Device` | `/sys/class/power_supply/lego-ev3-battery/`, read 2026-09-01 at 7.90 V |
+
+**The input probe aborted, and the cause is a flat battery.** With the
+gamepad paired and trusted, the operator pressed PS once. It connected on
+its own, the light bar lit solid white and then turned blue, and a few
+seconds later the controller powered itself off. No stick was moved, so
+the probe read no events and was terminated. `dmesg` records **eleven**
+bind-and-vanish cycles, `0005:054C:09CC.0004` through `.000B`, each a
+clean `sony` bind followed by the device disappearing. That is a power
+fault and not a Bluetooth fault: the pack had charge enough to bring up
+the radio and complete a connection, but not to hold the radio and the
+light bar up together. Nothing so far suggests the controller is faulty.
+
+**The light bar changing colour is evidence in its own right.**
+`hid-generic` has no LED driver and never sets a light bar colour.
+Something assigned this controller a per-device colour, and only a
+Sony-specific driver does that. Alone it would be suggestive rather than
+conclusive; alongside the `sony` line in `dmesg` it is not needed.
+
+**A battery node would be the same kind of evidence.** `hid-generic`
+does not parse the DualShock 4's battery field and creates no
+`power_supply` node at all, so a node reporting `scope` of `Device`
+under `/sys/class/power_supply/` can only have been made by a driver
+that understands this controller. `agent/battery_report.py` reports it,
+and classifies by `scope` rather than by node name because hid-sony
+names the gamepad's node after the controller's MAC address - the one
+thing that differs per controller. Run with the gamepad off, it prints
+the brick's pack alone and says the gamepad node is absent.
+
 ### Verified in simulation only
 
 Exercised on the development machine on 2026-08-29, against a fake sysfs
@@ -269,7 +317,7 @@ that the radio belongs to the gamepad is the actual design.
 | --- | --- | --- |
 | **Round-trip time over Bluetooth PAN**, typical and maximum | **Blocked, not merely unmeasured.** This Mac appears to provide no Bluetooth PAN client at all - see "Bluetooth PAN on macOS" below. Until a second transport exists, `drive` is transport-independent by construction and not by demonstration | **Phase 2a, acceptance item 8**, which needs either a different host or a different second transport |
 | Whether the brick itself can offer Bluetooth PAN (NAP) | Not tested. The brick was off the USB bus when the question came up, and with no client on the Mac there was nothing to test against | Only worth answering if a PAN client is found |
-| Whether `hid-sony` binds the DualShock 4 on this kernel | No gamepad has been paired. `hid-sony` is not confirmed present in this kernel build either | **Phase 3.** Pair the controller, then look for the device under `/dev/input/` and check the driver bound to it |
+| The DualShock 4's full axis and button mapping, and its stick centre and resting drift | **Blocked on a flat battery, not on software.** The controller pairs, `hid-sony` binds, and `B: ABS=3003f` says which axes exist - but it powers itself off within seconds, so not one event has ever been read from `/dev/input/event4`. Which evdev code each physical control produces, and what a centred stick actually reads, are still unmeasured | **Phase 3**, acceptance items 3 and 4, once the controller has been charged from a mains charger |
 | That the dashboard's keys drive a motor, and that a device unplugged mid-session empties its row | A motor has now been commanded over the real link and turned, and `ev3ctl scan` shows both motors in the right rows. What has not been exercised on hardware is `ev3ctl live` itself: its key handling, its rescan-on-replug, and its teardown | **Phase 2**, acceptance items 4, 5 and 8 |
 | Sensor behaviour: `decimals`, `units`, `modes`, and whether mode cycling works | No sensor is attached to this brick | **Phase 2**, acceptance item 6 |
 | Why the brick dropped off the USB bus mid-session on 2026-08-29 | The `en7` interface vanished and the interface list returned byte-identical to the pre-plug baseline, while work was in progress. Cause unknown: cable, power, or an idle shutdown | **Phase 0**, next time the brick is connected. If it recurs, it matters a great deal, because a link that dies on its own is the latch test happening at random |
@@ -659,7 +707,10 @@ is committed.
 **Acceptance test.** On the physical brick, with the gamepad:
 
 1. The controller pairs from the brick and appears as an input device.
+   **Done 2026-09-01.** Paired and trusted at `00:22:68:F2:5C:B6`, and
+   it appears as `/dev/input/event4`.
 2. The driver bound to it is recorded. **Add it to the Verified table.**
+   **Done 2026-09-01.** `hid-sony`, quoted in "Verified: the gamepad".
 3. Every stick, trigger, D-pad direction and button produces an event,
    and the event code for each is written down.
 4. Stick centre values and resting drift are measured, not assumed. A
@@ -674,6 +725,14 @@ is committed.
 
 **Pass:** 3, 5 and 7. Item 4 is what makes Phase 4 possible; item 6 is
 the first half of Phase 5.
+
+**Where this phase stands.** Items 1 and 2 are done, and they were the
+two the phase was actually blocked on. Items 3 to 7 all need a
+controller that stays powered on, so they wait on a charge and on
+nothing else. The mapping in item 3 is deliberately not guessed from a
+table on the internet in the meantime: `B: ABS=3003f` says which axes
+exist, and that is a different claim from knowing which one a given
+stick moves.
 
 ## Phase 4: Non-blocking control loop
 
