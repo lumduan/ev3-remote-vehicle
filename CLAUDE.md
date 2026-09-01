@@ -25,9 +25,14 @@ CPython **3.12 or later on macOS**. `rich` is available and expected.
 of it is ever copied to the brick or executed there.
 
 **BRICK code — everything under `agent/`.**
-CPython **3.5 on ev3dev (Debian 9)**, **standard library only**. The
-brick has no internet access and nothing installed beyond the stock
-image, so there is no `pip install` escape hatch. No f-strings, no
+CPython **3.5 on ev3dev (Debian 9)**, **standard library only, with one
+named exception**. The brick has no internet access and nothing
+installed beyond the stock image, so there is no `pip install` escape
+hatch. The exception is that `agent/tank_drive.py` may import
+`ev3dev2.display` and `ev3dev2.fonts`: they ship in the stock image and
+are the only way to put readable text on the LCD. Nothing else under
+`agent/` may import anything third-party. `agent/README.md` records what
+was measured before that exception was made. No f-strings, no
 `dataclasses`, no walrus operator, no `typing` at runtime. Type hints go
 in comments. See [`agent/README.md`](agent/README.md) for the full table
 of what 3.5 does not have.

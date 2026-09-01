@@ -19,6 +19,7 @@ Forbidden here, even though they are fine under `src/`:
 | Not allowed | Why |
 | --- | --- |
 | any third-party import | nothing is installed on the brick |
+| ...except `ev3dev2`, for the LCD only | see below |
 | `ev3dev`, `ev3dev2`, `rich` | third-party; talk to sysfs directly |
 | f-strings | 3.5 does not have them; use `.format()` |
 | the `=` specifier in f-strings | 3.8 |
@@ -27,6 +28,40 @@ Forbidden here, even though they are fine under `src/`:
 | `typing` at runtime | keep hints in comments |
 | `subprocess.run(capture_output=...)` | 3.7 |
 | `pathlib` conveniences added after 3.5 | read sysfs with `open()` |
+
+### The one exception: `ev3dev2`, for the LCD
+
+`agent/tank_drive.py` imports `ev3dev2.display` and `ev3dev2.fonts`.
+Nothing else may, and nothing may import anything else from it.
+
+The rule above exists because nothing is installed on the brick and
+there is no pip to install it with. `ev3dev2` is different: it ships in
+the stock ev3dev image, at `/usr/lib/python3/dist-packages/ev3dev2/`, so
+the reason does not apply to it.
+
+It is there because every standard-library route to the screen was tried
+first and measured on 2026-09-01:
+
+- **`print()` to the console works**, and is what the operator sees when
+  a program is launched from Brickman, whose `conrun` console is the
+  LCD. But that console is 44x21 characters in a 4x6 pixel font, and
+  making it bigger needs `setfont`, which needs root.
+- **Writing `/dev/fb0` directly works** while nothing else is drawing,
+  and loses otherwise: fbcon owns whichever console is being displayed
+  and repaints over anything put underneath it.
+- **The documented fix is `chvt`** to an unused console. That is root
+  only, `sudo` here wants a password, and unbinding fbcon through
+  `/sys/class/vtconsole/vtcon1/bind` is root only as well.
+
+The import is guarded and the code falls back to `print()` when it
+fails, so a brick without `ev3dev2` still drives. Driving is the point;
+the screen is a convenience.
+
+One trap, since it cost an hour: the module is **`ev3dev2.fonts`**,
+plural. `ev3dev2.font` does not exist, and importing it raises an
+ImportError that a bare `except` will hide - which is exactly what
+happened, leaving `HAVE_DISPLAY` quietly False and the screen blank with
+no error anywhere.
 
 Type hints go in comments, not annotations:
 

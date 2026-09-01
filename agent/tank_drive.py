@@ -73,14 +73,6 @@ BTN_L1 = 310
 BTN_R1 = 311
 EV_KEY = 0x01
 
-# How often a held screen is pushed back to the LCD, and how often its
-# contents are rebuilt. brickman repaints the whole framebuffer about
-# once a second - measured, not assumed - so a screen drawn once is gone
-# before it can be read. Pushing a cached frame costs 9 ms; rebuilding
-# it costs far more, and a battery reading does not change in a second.
-SCREEN_REPAINT_S = 0.25
-SCREEN_REBUILD_S = 2.0
-
 # Per loop iteration. A stick slammed to full would otherwise hand the
 # gearbox a step change; this spreads it over about 250 ms.
 SLEW_PCT_PER_LOOP = 10
@@ -198,214 +190,75 @@ def read_rest(fd, code):
 # ---------------------------------------------------------------------
 # The EV3 screen
 #
-# 178x128 at 32 bits per pixel, stride 712, read off /sys/class/graphics
-# on 2026-09-01. The byte order is BGRA: brickman's own background reads
-# ff ff ff 00 and its text reads 00 00 00 00, which is how white and
-# black were established rather than assumed.
+# Through ev3dev2.display, which is the one thing on this brick built for
+# it. **This is the single exception to the standard-library-only rule
+# for agent/**, and it is a narrow one: ev3dev2 ships in the stock image
+# at /usr/lib/python3/dist-packages/, so the rule's actual reason -
+# nothing is installed on the brick and there is no pip to install it
+# with - does not apply. See agent/README.md.
 #
-# brickman owns this framebuffer. Anything drawn here shows until it
-# repaints, which makes this a notification and not a user interface.
-# There is no font library on the brick and no third-party package may
-# be installed, so the glyphs below are the font.
+# Everything else was tried first and measured:
+#
+#   print() to the console works and the operator can read it, but the
+#   console is 44x21 characters in a 4x6 pixel font, and enlarging it
+#   needs setfont, which needs root.
+#
+#   Writing /dev/fb0 directly works over ssh while brickman is idle, and
+#   loses to it otherwise. fbcon owns whichever console is displayed and
+#   repaints over anything drawn underneath.
+#
+#   The documented fix is `chvt` to an unused console. That needs root,
+#   sudo here wants a password, and unbinding fbcon
+#   (/sys/class/vtconsole/vtcon1/bind) is root-only too.
+#
+# The import is guarded, so a brick without ev3dev2 falls back to
+# printing rather than refusing to drive. Driving is the point; the
+# screen is a convenience.
 # ---------------------------------------------------------------------
 
-FB_PATH = "/dev/fb0"
-FB_WIDTH = 178
-FB_HEIGHT = 128
-FB_STRIDE = 712
-FB_BPP = 4
-WHITE = b"\xff\xff\xff\x00"
-BLACK = b"\x00\x00\x00\x00"
+try:
+    # `fonts`, plural. There is no ev3dev2.font, and the singular form
+    # fails as an ImportError that a bare except would hide - which it
+    # did, silently, until the exception was actually printed.
+    from ev3dev2 import fonts as _fonts
+    from ev3dev2.display import Display as _Display
+    HAVE_DISPLAY = True
+except Exception:
+    HAVE_DISPLAY = False
 
-# 5x7, one byte per column, bit 0 is the top row.
-FONT = {
-    " ": (0x00, 0x00, 0x00, 0x00, 0x00),
-    ".": (0x00, 0x60, 0x60, 0x00, 0x00),
-    "%": (0x23, 0x13, 0x08, 0x64, 0x62),
-    ":": (0x00, 0x36, 0x36, 0x00, 0x00),
-    "-": (0x08, 0x08, 0x08, 0x08, 0x08),
-    "/": (0x20, 0x10, 0x08, 0x04, 0x02),
-    "0": (0x3E, 0x51, 0x49, 0x45, 0x3E),
-    "1": (0x00, 0x42, 0x7F, 0x40, 0x00),
-    "2": (0x42, 0x61, 0x51, 0x49, 0x46),
-    "3": (0x21, 0x41, 0x45, 0x4B, 0x31),
-    "4": (0x18, 0x14, 0x12, 0x7F, 0x10),
-    "5": (0x27, 0x45, 0x45, 0x45, 0x39),
-    "6": (0x3C, 0x4A, 0x49, 0x49, 0x30),
-    "7": (0x01, 0x71, 0x09, 0x05, 0x03),
-    "8": (0x36, 0x49, 0x49, 0x49, 0x36),
-    "9": (0x06, 0x49, 0x49, 0x29, 0x1E),
-    "A": (0x7E, 0x11, 0x11, 0x11, 0x7E),
-    "B": (0x7F, 0x49, 0x49, 0x49, 0x36),
-    "C": (0x3E, 0x41, 0x41, 0x41, 0x22),
-    "D": (0x7F, 0x41, 0x41, 0x22, 0x1C),
-    "E": (0x7F, 0x49, 0x49, 0x49, 0x41),
-    "F": (0x7F, 0x09, 0x09, 0x09, 0x01),
-    "G": (0x3E, 0x41, 0x49, 0x49, 0x7A),
-    "H": (0x7F, 0x08, 0x08, 0x08, 0x7F),
-    "I": (0x00, 0x41, 0x7F, 0x41, 0x00),
-    "K": (0x7F, 0x08, 0x14, 0x22, 0x41),
-    "L": (0x7F, 0x40, 0x40, 0x40, 0x40),
-    "N": (0x7F, 0x04, 0x08, 0x10, 0x7F),
-    "O": (0x3E, 0x41, 0x41, 0x41, 0x3E),
-    "P": (0x7F, 0x09, 0x09, 0x09, 0x06),
-    "R": (0x7F, 0x09, 0x19, 0x29, 0x46),
-    "S": (0x46, 0x49, 0x49, 0x49, 0x31),
-    "T": (0x01, 0x01, 0x7F, 0x01, 0x01),
-    "U": (0x3F, 0x40, 0x40, 0x40, 0x3F),
-    "V": (0x1F, 0x20, 0x40, 0x20, 0x1F),
-    "W": (0x3F, 0x40, 0x38, 0x40, 0x3F),
-    "X": (0x63, 0x14, 0x08, 0x14, 0x63),
-    "Y": (0x07, 0x08, 0x70, 0x08, 0x07),
-}
+# Bigger than the console's 4x6. Loaded once; load() is not free.
+FONT_BIG = "luBS14"
+FONT_HUGE = "luBS24"
+
+_LCD = {"display": None, "big": None, "huge": None}
 
 
-def _glyph_runs(columns):
-    # type: (tuple) -> tuple
-    """One glyph as, per row, the runs of lit columns.
-
-    Done once at import. Working it out per character per draw cost
-    22 ms a character on this brick, which is most of a screen.
-    """
-    rows = []
-    for row in range(7):
-        lit = [c for c in range(5) if (columns[c] >> row) & 1]
-        runs = []
-        if lit:
-            first = prev = lit[0]
-            for column in lit[1:]:
-                if column == prev + 1:
-                    prev = column
-                    continue
-                runs.append((first, prev + 1))
-                first = prev = column
-            runs.append((first, prev + 1))
-        rows.append(tuple(runs))
-    return tuple(rows)
-
-
-GLYPHS = dict((char, _glyph_runs(cols)) for char, cols in FONT.items())
-
-
-# Drawing is done as row spans, never pixel by pixel. Measured on this
-# brick on 2026-09-01: one _pixel call cost 0.8 ms, so a screen with two
-# bars and three lines of text took 5.3 seconds to build - which in a
-# control loop means five seconds of the motors holding their last
-# command while nothing reads the stick. Spans turn thousands of Python
-# calls into a few hundred slice assignments.
-
-
-def _spans():
-    # type: () -> list
-    """A new drawing: one list of (x0, x1) black runs per screen row.
-
-    A list indexed by row rather than a dict keyed by it, so the hot
-    loop in _text can reach a row without a function call or a hash. On
-    this CPU a Python call costs about 0.6 ms, and a screenful of text
-    makes several hundred of them.
-    """
-    return [[] for _ in range(FB_HEIGHT)]
-
-
-def _run(spans, y, x0, x1):
-    # type: (list, int, int, int) -> None
-    if not (0 <= y < FB_HEIGHT):
-        return
-    x0 = max(0, x0)
-    x1 = min(FB_WIDTH, x1)
-    if x1 > x0:
-        spans[y].append((x0, x1))
-
-
-def _text(spans, x, y, message, scale=2):
-    # type: (dict, int, int, str, int) -> int
-    """Draw a line of text, returning the x it ended at."""
-    for char in message.upper():
-        rows = GLYPHS.get(char)
-        if rows is not None:
-            for row in range(7):
-                runs = rows[row]
-                if not runs:
-                    continue
-                top = y + row * scale
-                for dy in range(scale):
-                    yy = top + dy
-                    if 0 <= yy < FB_HEIGHT:
-                        # Appended straight into the row, no call: this
-                        # runs a few hundred times per screen and a
-                        # Python call costs 0.6 ms on this brick.
-                        bucket = spans[yy]
-                        for a, b in runs:
-                            bucket.append((x + a * scale, x + b * scale))
-        x += 6 * scale
-    return x
-
-
-def _bar(spans, x, y, width, height, percent):
-    # type: (dict, int, int, int, int, int) -> None
-    """An outlined bar filled to `percent`. Easier to read than digits."""
-    _run(spans, y, x, x + width)
-    _run(spans, y + height - 1, x, x + width)
-    for i in range(1, height - 1):
-        _run(spans, y + i, x, x + 1)
-        _run(spans, y + i, x + width - 1, x + width)
-    filled = int((width - 4) * max(0, min(100, percent)) / 100.0)
-    for j in range(height - 4):
-        _run(spans, y + 2 + j, x + 2, x + 2 + filled)
-
-
-def _rule(spans, y):
-    # type: (dict, int) -> None
-    _run(spans, y, 4, FB_WIDTH - 4)
-
-
-def _render(spans):
-    # type: (dict) -> bytearray
-    """Compose the spans into one frame ready for the framebuffer."""
-    frame = bytearray(WHITE * (FB_WIDTH * FB_HEIGHT))
-    base = 0
-    row_bytes = FB_WIDTH * FB_BPP
-    for runs in spans:
-        if runs:
-            for x0, x1 in runs:
-                frame[base + x0 * FB_BPP: base + x1 * FB_BPP] = \
-                    BLACK * (x1 - x0)
-        base += row_bytes
-    return frame
-
-
-def _flush(frame):
-    # type: (bytearray) -> None
-    """Push one frame to the LCD. Never raises into the control loop.
-
-    The stride equals the row length here, so the whole frame goes in
-    one write - 9 ms, against 5.3 seconds for the drawing it replaced.
-    That is what makes repainting affordable.
-
-    A drawing mistake must not be able to stop the motors responding, so
-    every failure is swallowed. A blank screen is a great deal better
-    than a robot that stops steering because a readout went wrong.
-    """
-    try:
-        handle = os.open(FB_PATH, os.O_WRONLY)
-    except Exception:
-        return
-    try:
-        if FB_STRIDE == FB_WIDTH * FB_BPP:
-            os.write(handle, bytes(frame))
-        else:
-            for row in range(FB_HEIGHT):
-                os.lseek(handle, row * FB_STRIDE, os.SEEK_SET)
-                start = row * FB_WIDTH * FB_BPP
-                os.write(handle,
-                         bytes(frame[start:start + FB_WIDTH * FB_BPP]))
-    except Exception:
-        pass
-    finally:
+def _lcd():
+    # type: () -> object
+    """The Display, made on first use. None if there is none."""
+    if not HAVE_DISPLAY:
+        return None
+    if _LCD["display"] is None:
         try:
-            os.close(handle)
+            _LCD["display"] = _Display()
+            _LCD["big"] = _fonts.load(FONT_BIG)
+            try:
+                _LCD["huge"] = _fonts.load(FONT_HUGE)
+            except Exception:
+                _LCD["huge"] = _LCD["big"]
         except Exception:
-            pass
+            return None
+    return _LCD["display"]
+
+
+def _bar(draw, x, y, width, height, percent):
+    # type: (object, int, int, int, int, int) -> None
+    """An outlined bar filled to `percent`. Read faster than digits."""
+    draw.rectangle((x, y, x + width, y + height), outline="black")
+    filled = int((width - 4) * max(0, min(100, percent)) / 100.0)
+    if filled > 0:
+        draw.rectangle((x + 2, y + 2, x + 2 + filled, y + height - 2),
+                       fill="black")
 
 
 # An EV3 pack is six AA cells. Anything outside this band is not a
@@ -535,88 +388,141 @@ def read_battery():
     return volts, percent, pad_percent, pad_status
 
 
-def battery_frame():
-    # type: () -> bytearray
-    """Both batteries: the brick's and the gamepad's."""
-    volts, percent, pad_percent, pad_status = read_battery()
-    spans = _spans()
-    _text(spans, 4, 4, "BATTERY", 2)
-    _rule(spans, 22)
-    if volts is None:
-        _text(spans, 4, 30, "EV3  NO READING", 1)
-    else:
-        _text(spans, 4, 30, "EV3", 2)
-        _text(spans, 46, 30, "{0:.2f}V".format(volts), 2)
-        if percent is not None:
-            _text(spans, 128, 30, "{0}%".format(percent), 2)
-            _bar(spans, 4, 48, 170, 14, percent)
-    if pad_percent is None:
-        _text(spans, 4, 74, "PAD  NOT CONNECTED", 1)
-    else:
-        _text(spans, 4, 72, "PAD", 2)
-        _text(spans, 46, 72, "{0}%".format(pad_percent), 2)
-        _bar(spans, 4, 90, 170, 14, pad_percent)
-        if pad_status:
-            _text(spans, 4, 110, pad_status[:18], 1)
-    return _render(spans)
-
-
 def show_battery():
-    # type: () -> bytearray
-    frame = battery_frame()
-    _flush(frame)
-    return frame
+    # type: () -> None
+    """Both batteries, drawn if there is a display and printed if not."""
+    volts, percent, pad_percent, pad_status = read_battery()
+    lcd = _lcd()
+    if lcd is None:
+        print("")
+        print("  -- BATTERY --")
+        print("  EV3  {0}".format(
+            "no reading" if volts is None else "{0:.2f} V  {1}".format(
+                volts, "?" if percent is None else
+                "{0}%".format(percent))))
+        print("  PAD  {0}".format(
+            "not connected" if pad_percent is None else
+            "{0}%  {1}".format(pad_percent, pad_status or "")))
+        sys.stdout.flush()
+        return
+    try:
+        lcd.clear()
+        draw = lcd.draw
+        big = _LCD["big"]
+        draw.text((4, 0), "BATTERY", font=big)
+        draw.line((4, 20, 173, 20), fill="black")
+        if volts is None:
+            draw.text((4, 26), "EV3  no reading", font=big)
+        else:
+            draw.text((4, 26), "EV3 {0:.2f}V  {1}".format(
+                volts, "?" if percent is None else
+                "{0}%".format(percent)), font=big)
+            if percent is not None:
+                _bar(draw, 4, 46, 169, 14, percent)
+        if pad_percent is None:
+            draw.text((4, 66), "PAD  not conn.", font=big)
+        else:
+            draw.text((4, 66), "PAD {0}%".format(pad_percent), font=big)
+            _bar(draw, 4, 86, 169, 14, pad_percent)
+            if pad_status:
+                draw.text((4, 106), pad_status, font=big)
+        lcd.update()
+    except Exception as exc:
+        sys.stderr.write("display failed: {0}\n".format(exc))
+        sys.stderr.flush()
 
 
 def show_ready(speed, port_left, port_right):
     # type: (int, str, str) -> None
     """What the operator sees when there is no terminal to print to."""
     volts, percent, pad_percent, _ = read_battery()
-    spans = _spans()
-    _text(spans, 4, 4, "TANK READY", 2)
-    _rule(spans, 22)
-    _text(spans, 4, 30, "SPEED {0}%".format(speed), 2)
-    _text(spans, 4, 52, "{0} / {1}".format(port_left, port_right), 2)
-    if volts is not None:
-        _text(spans, 4, 74, "EV3 {0:.1f}V {1}%".format(
-            volts, "?" if percent is None else percent), 2)
-    if pad_percent is not None:
-        _text(spans, 4, 96, "PAD {0}%".format(pad_percent), 2)
-    _text(spans, 4, 118, "L1 SPEED   R1 BATTERY (STOPS)", 1)
-    _flush(_render(spans))
+    lcd = _lcd()
+    if lcd is None:
+        print("")
+        print("  TANK READY")
+        print("  speed {0}%   {1}/{2}".format(speed, port_left, port_right))
+        if volts is not None:
+            print("  EV3 {0:.1f}V {1}%".format(
+                volts, "?" if percent is None else percent))
+        print("  L1 hold = speed   R1 = battery")
+        sys.stdout.flush()
+        return
+    try:
+        lcd.clear()
+        draw = lcd.draw
+        big = _LCD["big"]
+        draw.text((4, 0), "TANK READY", font=big)
+        draw.line((4, 20, 173, 20), fill="black")
+        draw.text((4, 26), "SPEED {0}%".format(speed), font=big)
+        draw.text((4, 46), "{0} / {1}".format(port_left, port_right),
+                  font=big)
+        if volts is not None:
+            draw.text((4, 66), "EV3 {0:.1f}V {1}%".format(
+                volts, "?" if percent is None else percent), font=big)
+        if pad_percent is not None:
+            draw.text((4, 86), "PAD {0}%".format(pad_percent), font=big)
+        draw.text((4, 108), "L1=SPEED  R1=BATTERY", font=big)
+        lcd.update()
+    except Exception as exc:
+        sys.stderr.write("display failed: {0}\n".format(exc))
+        sys.stderr.flush()
 
 
 def show_message(title, detail=""):
     # type: (str, str) -> None
     """A failure the operator can act on, when stderr reaches nobody."""
-    spans = _spans()
-    _text(spans, 4, 8, title[:14], 2)
-    _rule(spans, 28)
-    y = 40
-    words = detail.upper().split()
-    line = ""
-    while words and y <= FB_HEIGHT - 14:
-        candidate = (line + " " + words[0]).strip()
-        if len(candidate) > 28:
-            _text(spans, 4, y, line, 1)
-            y += 12
-            line = ""
-        else:
-            line = candidate
-            words.pop(0)
-    if line and y <= FB_HEIGHT - 14:
-        _text(spans, 4, y, line, 1)
-    _flush(_render(spans))
+    lcd = _lcd()
+    if lcd is None:
+        print("")
+        print("  " + title)
+        if detail:
+            print("  " + detail)
+        sys.stdout.flush()
+        return
+    try:
+        lcd.clear()
+        draw = lcd.draw
+        big = _LCD["big"]
+        draw.text((4, 0), title, font=big)
+        draw.line((4, 20, 173, 20), fill="black")
+        y = 28
+        words = detail.split()
+        line = ""
+        while words and y < 112:
+            candidate = (line + " " + words[0]).strip()
+            if len(candidate) > 22:
+                draw.text((4, y), line, font=big)
+                y += 18
+                line = ""
+            else:
+                line = candidate
+                words.pop(0)
+        if line and y < 112:
+            draw.text((4, y), line, font=big)
+        lcd.update()
+    except Exception as exc:
+        sys.stderr.write("display failed: {0}\n".format(exc))
+        sys.stderr.flush()
 
 
 def show_speed(speed):
     # type: (int) -> None
-    """The new speed level, big enough to read from across a room."""
-    spans = _spans()
-    _text(spans, 4, 8, "SPEED", 2)
-    _text(spans, 20, 40, "{0}%".format(speed), 5)
-    _bar(spans, 4, 100, 170, 18, speed)
-    _flush(_render(spans))
+    """The new speed level, as large as the screen allows."""
+    lcd = _lcd()
+    if lcd is None:
+        print("  speed {0}%".format(speed))
+        sys.stdout.flush()
+        return
+    try:
+        lcd.clear()
+        draw = lcd.draw
+        draw.text((4, 4), "SPEED", font=_LCD["big"])
+        draw.text((30, 30), "{0}%".format(speed), font=_LCD["huge"])
+        _bar(draw, 4, 96, 169, 20, speed)
+        lcd.update()
+    except Exception as exc:
+        sys.stderr.write("display failed: {0}\n".format(exc))
+        sys.stderr.flush()
 
 
 # ---------------------------------------------------------------------
@@ -838,10 +744,6 @@ def main():
     stopping = {"now": False}
     l1_down_at = None
     l1_fired = False
-    r1_held = False
-    screen_due = 0.0
-    screen_frame = None
-    screen_rebuild_due = 0.0
 
     def request_stop(signum, frame):
         stopping["now"] = True
@@ -879,17 +781,13 @@ def main():
                             l1_fired = False
                         elif value == 0:
                             l1_down_at = None
-                    elif kind == EV_KEY and code == BTN_R1:
-                        # Held, not tapped. brickman repaints the whole
-                        # screen about once a second, so a frame drawn
-                        # once is gone before it can be read. Holding R1
-                        # repaints it faster than brickman does, which is
-                        # also the natural gesture for "let me look".
-                        r1_held = value == 1
-                        if not r1_held:
-                            screen_due = 0.0
-                            screen_rebuild_due = 0.0
-                            screen_frame = None
+                    elif (kind == EV_KEY and code == BTN_R1
+                          and value == 1):
+                        # A press, not a hold. Printing four lines costs
+                        # nothing, so there is no reason to make the
+                        # operator hold the button or to stop the robot
+                        # while they read.
+                        show_battery()
 
             now = time.monotonic()
             if now < next_tick:
@@ -908,30 +806,6 @@ def main():
                 sys.stderr.flush()
                 set_speed_leds(level)
                 show_speed(SPEED_LEVELS[level])
-                screen_due = now + 1.0
-
-            # Reading the screen and driving are not compatible on a
-            # 300 MHz CPU: composing a frame takes long enough that the
-            # loop would stop reading the stick while it happened, with
-            # the motors holding their last command. So holding R1 stops
-            # the robot. The operator is looking at the screen anyway,
-            # and a machine that coasts while nobody is steering it is
-            # the wrong default.
-            if r1_held:
-                left_duty = 0.0
-                right_duty = 0.0
-                motors.drive(0, 0)
-
-            if r1_held and now >= screen_due:
-                # Build rarely, push often. The build reads sysfs and
-                # composes 91 KB; the push is one write. Doing both at
-                # the repaint rate would hold the control loop for a
-                # noticeable fraction of every second.
-                if screen_frame is None or now >= screen_rebuild_due:
-                    screen_frame = battery_frame()
-                    screen_rebuild_due = now + SCREEN_REBUILD_S
-                _flush(screen_frame)
-                screen_due = now + SCREEN_REPAINT_S
 
             # Up is forward, and up drives ABS_Y toward its minimum on
             # this controller, so the vertical axis is negated. Measured,
@@ -942,9 +816,6 @@ def main():
             turn = axis_fraction(
                 latest[AXIS_X], rest[AXIS_X], limits[AXIS_X][0],
                 limits[AXIS_X][1])
-
-            if r1_held:
-                continue
 
             # The level scales the target, before the slew limiter, so
             # that changing speed while driving ramps rather than jumps.
