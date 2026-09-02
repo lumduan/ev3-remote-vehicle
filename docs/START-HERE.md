@@ -113,6 +113,7 @@ A menu appears:
       Put the programs on the robot       not checked
       Drive the robot
       Use the gamepad as the robot's buttons       off
+      Start the buttons by themselves     not checked
       How full are the batteries
       Something is wrong - help me
       Language / ภาษา                         English
@@ -207,6 +208,31 @@ the robot down:
 You will hear a small click each time, so you know it worked.
 
 Choose the same menu item again to turn it off.
+
+---
+
+## 9b. Make the buttons start by themselves
+
+You can tell the robot to switch the gamepad buttons on every time it
+starts. Then you never have to do step 9 again — just turn the robot on
+and press PS.
+
+Choose **Start the buttons by themselves** in the menu.
+
+The last part of this needs a grown-up, **once ever**. The menu will
+show them exactly what to type:
+
+```bash
+sudo loginctl enable-linger robot
+```
+
+It asks for a password. The password is `maker`.
+
+That line gives the robot permission to start your programs before
+anybody signs in. Nothing else about it ever needs a grown-up again.
+
+When it is done, press Enter and the menu will check and tell you
+whether it worked.
 
 ---
 

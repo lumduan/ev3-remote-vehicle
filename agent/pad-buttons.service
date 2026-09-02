@@ -1,0 +1,35 @@
+# systemd USER unit, not a system one. Installed into the operator's own
+# ~/.config/systemd/user/ so that enabling, disabling and editing it all
+# stay theirs, with no root.
+#
+# Root is needed exactly once, ever, and not for this file:
+#
+#     sudo loginctl enable-linger robot
+#
+# Without that, systemd starts a user's services when they log in and
+# stops them when they log out - and nobody logs in to a brick at boot.
+# Measured on this hardware 2026-09-02: no cron, no /etc/rc.local,
+# /etc/systemd/system root-only, Linger=no. There is no root-free route.
+#
+# Runs as robot, who is already in the `input` group and so can inject
+# key events. It needs no more privilege than that, which is why this is
+# a user unit and not a system one.
+
+[Unit]
+Description=Gamepad buttons as EV3 brick buttons
+Documentation=https://github.com/lumduan/ev3-remote-vehicle
+After=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/home/robot/pad_buttons/pad_buttons.py --foreground
+
+# on-failure, not always. The program is a toggle: launching it from the
+# File Browser while this service is running stops it, and it must stay
+# stopped rather than be restarted a second later, which would read as
+# "it will not turn off".
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

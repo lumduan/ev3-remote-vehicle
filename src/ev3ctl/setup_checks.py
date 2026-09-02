@@ -16,11 +16,38 @@ import hashlib
 import os
 import subprocess
 
-# The two programs that make the robot usable, and where they live on
+# The two programs that make the robot usable, and where each lives on
 # the brick. /home/robot rather than /tmp: /tmp does not survive a
 # reboot, and Brickman's File Browser is where a child will look.
-BRICK_DIR = "/home/robot/tanks_1"
-PROGRAMS = ("tank_drive.py", "pad_buttons.py")
+#
+# They are in separate folders on purpose. tank_drive is started for a
+# session and then stopped; pad_buttons is meant to be running all the
+# time, so it is not part of "the driving stuff" and does not sit with
+# it. Its pidfile and log land beside it, because the program derives
+# both from its own location.
+DRIVE_DIR = "/home/robot/tanks_1"
+BUTTONS_DIR = "/home/robot/pad_buttons"
+
+PROGRAMS = {
+    "tank_drive.py": DRIVE_DIR,
+    "pad_buttons.py": BUTTONS_DIR,
+}
+
+# Where pad_buttons used to live, so an install can clear it away rather
+# than leave a second copy that Brickman will happily run.
+OLD_LOCATIONS = (
+    "/home/robot/tanks_1/pad_buttons.py",
+    "/home/robot/tanks_1/pad_buttons.pid",
+    "/home/robot/tanks_1/pad_buttons.log",
+    "/home/robot/pad_buttons.py",
+    "/home/robot/tank_drive.py",
+)
+
+# The systemd user unit. A user unit, not a system one: it runs as
+# robot, who is already in the `input` group, and needs no more.
+UNIT_NAME = "pad-buttons.service"
+UNIT_DIR = "/home/robot/.config/systemd/user"
+LINGER_COMMAND = "sudo loginctl enable-linger robot"
 
 # Verdicts. `ok` is fine, `bad` needs the operator to do something,
 # `unknown` means it has not been looked at yet.
@@ -42,8 +69,13 @@ def agent_dir():
     return os.path.join(os.path.dirname(os.path.dirname(here)), "agent")
 
 
+def brick_path(name):
+    """Where one program belongs on the brick."""
+    return os.path.join(PROGRAMS[name], name)
+
+
 def local_digest(name):
-    """The md5 of a program in `agent/`, or None if it is not there."""
+    """The md5 of a file in `agent/`, or None if it is not there."""
     path = os.path.join(agent_dir(), name)
     try:
         with open(path, "rb") as handle:
@@ -140,7 +172,7 @@ def check_programs(host):
     ok, out = _ssh(
         host,
         "md5sum {0} 2>/dev/null || true".format(
-            " ".join(os.path.join(BRICK_DIR, n) for n in PROGRAMS)))
+            " ".join(brick_path(n) for n in sorted(PROGRAMS))))
     if not ok:
         return BAD, "missing", detail_or(out, "cannot ask the robot")
 
@@ -150,48 +182,139 @@ def check_programs(host):
         if len(parts) == 2:
             found[os.path.basename(parts[1])] = parts[0]
 
-    missing = [n for n in PROGRAMS if n not in found]
+    missing = [n for n in sorted(PROGRAMS) if n not in found]
     if missing:
         return BAD, "missing", ", ".join(missing)
-    stale = [n for n in PROGRAMS if found[n] != wanted[n]]
+    stale = [n for n in sorted(PROGRAMS) if found[n] != wanted[n]]
     if stale:
         return BAD, "old", ", ".join(stale)
     return OK, "ready", "both up to date"
 
 
-def install(host):
-    """Copy both programs to the brick and prove the copy landed.
+def check_autostart(host):
+    """Will the buttons start by themselves at boot?
 
-    `cat >` rather than scp, the same choice link.py makes and for the
-    same reason: modern OpenSSH runs scp over SFTP, which needs
-    sftp-server on the far end, while cat needs only a shell.
+    Three things have to be true, and they fail in a useful order: the
+    unit has to be installed, the robot user has to be lingering - the
+    one that needs root, and so the one worth naming separately - and
+    the unit has to be enabled and running.
 
-    Returns (ok, detail).
+    Every probe is asked to label its own answer. Substring matching
+    would be wrong twice over here: "disabled" contains "enabled", and
+    "inactive" contains "active", so a stopped, disabled service would
+    report itself as running and enabled.
+
+    Returns (verdict, state, detail) where state is one of
+    "on", "needs_root", "off".
     """
-    ok, detail = _ssh(host, "mkdir -p " + BRICK_DIR)
+    ok, out = _ssh(
+        host,
+        "echo unit=$(test -f {0}/{1} && echo yes || echo no); "
+        "echo enabled=$(systemctl --user is-enabled {1} 2>/dev/null "
+        "|| echo unknown); "
+        "echo linger=$(loginctl show-user robot 2>/dev/null "
+        "| sed -n 's/^Linger=//p' || echo unknown); "
+        "echo active=$(systemctl --user is-active {1} 2>/dev/null "
+        "|| echo unknown)".format(UNIT_DIR, UNIT_NAME))
     if not ok:
-        return False, detail
+        return BAD, "off", detail_or(out, "cannot ask the robot")
 
-    for name in PROGRAMS:
+    fields = {}
+    for line in out.splitlines():
+        key, _, value = line.strip().partition("=")
+        fields[key] = value.strip().lower()
+
+    if fields.get("unit") != "yes":
+        return BAD, "off", "the service is not installed"
+    if fields.get("linger") != "yes":
+        return BAD, "needs_root", LINGER_COMMAND
+    if fields.get("enabled") != "enabled":
+        return BAD, "off", "installed but not enabled"
+    if fields.get("active") != "active":
+        return BAD, "off", "enabled but not running"
+    return OK, "on", "running, and will start itself at boot"
+
+
+def install(host):
+    """Copy both programs, install the service, tidy old copies.
+
+    Returns (ok, detail, notes) - notes being the things worth saying
+    out loud, like a file that was moved out from under the operator.
+    """
+    notes = []
+
+    for name, directory in sorted(PROGRAMS.items()):
+        ok, detail = _ssh(host, "mkdir -p " + directory)
+        if not ok:
+            return False, detail, notes
+
+    for name in sorted(PROGRAMS):
         path = os.path.join(agent_dir(), name)
         try:
             with open(path, "rb") as handle:
                 source = handle.read()
         except OSError as exc:
-            return False, str(exc)
-        target = os.path.join(BRICK_DIR, name)
+            return False, str(exc), notes
+        target = brick_path(name)
         ok, detail = _ssh(
             host, "cat > {0} && chmod +x {0}".format(target),
             timeout=60, data=source)
         if not ok:
-            return False, "{0}: {1}".format(name, detail)
+            return False, "{0}: {1}".format(name, detail), notes
+
+    # A copy left where it used to live is not harmless: Brickman lists
+    # it and will happily run a second, older one.
+    for stale in OLD_LOCATIONS:
+        if stale in [brick_path(n) for n in PROGRAMS]:
+            continue
+        ok, out = _ssh(
+            host, "test -f {0} && rm -f {0} && echo removed || "
+                  "true".format(stale))
+        if ok and "removed" in out:
+            notes.append(stale)
+
+    ok, detail = install_service(host)
+    if not ok:
+        return False, detail, notes
 
     # Read it back. A copy that reported success and landed truncated
     # would otherwise be discovered by a child, on the floor, later.
     verdict, state, detail = check_programs(host)
     if verdict != OK:
-        return False, "copied but {0}: {1}".format(state, detail)
-    return True, detail
+        return False, "copied but {0}: {1}".format(state, detail), notes
+    return True, detail, notes
+
+
+def install_service(host):
+    """Put the systemd user unit in place and enable it.
+
+    Enabling works without lingering - it only writes a symlink - so
+    this is worth doing before the operator has run the one root
+    command. It simply will not start at boot until they have.
+    """
+    path = os.path.join(agent_dir(), UNIT_NAME)
+    try:
+        with open(path, "rb") as handle:
+            unit = handle.read()
+    except OSError as exc:
+        return False, str(exc)
+
+    ok, detail = _ssh(host, "mkdir -p " + UNIT_DIR)
+    if not ok:
+        return False, detail
+    ok, detail = _ssh(
+        host, "cat > {0}/{1}".format(UNIT_DIR, UNIT_NAME),
+        timeout=30, data=unit)
+    if not ok:
+        return False, detail
+    # Failures here are not fatal: the file is in place, and the wizard
+    # reports the state afterwards rather than trusting this to work.
+    _ssh(host, "systemctl --user daemon-reload 2>/dev/null || true")
+    _ssh(host, "systemctl --user enable {0} 2>/dev/null || true".format(
+        UNIT_NAME))
+    _ssh(host, "systemctl --user restart {0} 2>/dev/null || true".format(
+        UNIT_NAME))
+    return True, "service installed"
 
 
 def detail_or(text, fallback):

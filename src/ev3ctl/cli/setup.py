@@ -35,8 +35,8 @@ from ..messages import (
 )
 
 # The menu, in the order a first-time setup actually happens.
-ITEMS = ("check", "install", "drive", "buttons", "battery", "help",
-         "language", "quit")
+ITEMS = ("check", "install", "drive", "buttons", "autostart",
+         "battery", "help", "language", "quit")
 
 
 class Wizard(object):
@@ -55,6 +55,8 @@ class Wizard(object):
         self.gamepad = checks.UNKNOWN
         self.programs = checks.UNKNOWN
         self.programs_state = None
+        self.autostart = checks.UNKNOWN
+        self.autostart_state = None
         self.buttons_on = False
         self.last_detail = {}
         self.message = None
@@ -81,6 +83,14 @@ class Wizard(object):
             if self.programs_state == "old":
                 return self.say("status.old"), "warn"
             return self.say("status.missing"), "fail"
+        if item == "autostart":
+            if self.autostart == checks.UNKNOWN:
+                return self.say("status.unknown"), "dim"
+            if self.autostart_state == "on":
+                return self.say("status.on"), "ok"
+            if self.autostart_state == "needs_root":
+                return self.say("status.needsroot"), "warn"
+            return self.say("status.off"), "dim"
         if item == "buttons":
             if self.buttons_on:
                 return self.say("status.on"), "ok"
@@ -189,9 +199,23 @@ def do_check(wizard):
         console.print()
         console.print("      [hint]" + wizard.say("fix.programs")
                       + "[/hint]")
-    else:
         console.print()
+        _wait(wizard)
+        return
+
+    auto, state, detail = checks.check_autostart(wizard.host)
+    wizard.autostart = auto
+    wizard.autostart_state = state
+    wizard.last_detail["autostart"] = detail
+    _line(wizard, "check.autostart", auto)
+    console.print()
+    if auto == checks.OK:
         console.print("  [ok]" + wizard.say("check.allgood") + "[/ok]")
+    elif state == "needs_root":
+        console.print("  [warn]" + wizard.say("auto.needsroot")
+                      + "[/warn]")
+        console.print("      [head]" + checks.LINGER_COMMAND
+                      + "[/head]")
     console.print()
     _wait(wizard)
 
@@ -214,12 +238,26 @@ def do_install(wizard):
         return
     for name in checks.PROGRAMS:
         console.print("  " + wizard.say("install.copying", name))
-    ok, detail = checks.install(wizard.host)
+    ok, detail, notes = checks.install(wizard.host)
     console.print()
+    for moved in notes:
+        console.print("  [dim]" + wizard.say("install.moved", moved)
+                      + "[/dim]")
     if ok:
         wizard.programs = checks.OK
         wizard.programs_state = "ready"
         console.print("  [ok]" + wizard.say("install.done") + "[/ok]")
+        console.print("  [ok]" + wizard.say("install.service")
+                      + "[/ok]")
+        auto, state, _ = checks.check_autostart(wizard.host)
+        wizard.autostart = auto
+        wizard.autostart_state = state
+        if state == "needs_root":
+            console.print()
+            console.print("  [warn]" + wizard.say("auto.needsroot")
+                          + "[/warn]")
+            console.print("      [head]" + checks.LINGER_COMMAND
+                          + "[/head]")
     else:
         wizard.programs = checks.BAD
         console.print("  [fail]"
@@ -267,6 +305,55 @@ def _run_on_brick(wizard, program):
                        stderr=subprocess.PIPE, timeout=30)
     except Exception as exc:
         console.print("  [fail]" + str(exc) + "[/fail]")
+
+
+def do_autostart(wizard):
+    console.print()
+    console.print("[head]" + wizard.say("auto.title") + "[/head]")
+    console.print()
+    console.print("  " + wizard.say("auto.what"))
+    console.print()
+
+    auto, state, detail = checks.check_autostart(wizard.host)
+    wizard.autostart = auto
+    wizard.autostart_state = state
+    wizard.last_detail["autostart"] = detail
+
+    if auto == checks.OK:
+        console.print("  [ok]" + wizard.say("auto.on") + "[/ok]")
+        console.print()
+        _wait(wizard)
+        return
+    if state != "needs_root":
+        console.print("  [dim]" + wizard.say("auto.off") + "[/dim]")
+        console.print()
+        _wait(wizard)
+        return
+
+    # The one root command in the whole project. It is printed, never
+    # run: nothing here runs sudo, which is what keeps CLAUDE.md's rule
+    # literally true rather than approximately true.
+    console.print("  [warn]" + wizard.say("auto.needsroot") + "[/warn]")
+    console.print()
+    console.print("      [head]" + checks.LINGER_COMMAND + "[/head]")
+    console.print()
+    console.print("  " + wizard.say("auto.password"))
+    console.print("  " + wizard.say("auto.explain"))
+    console.print()
+    console.print("  [dim]" + wizard.say("auto.pressdone") + "[/dim]")
+    _wait(wizard)
+
+    auto, state, detail = checks.check_autostart(wizard.host)
+    wizard.autostart = auto
+    wizard.autostart_state = state
+    wizard.last_detail["autostart"] = detail
+    console.print()
+    if auto == checks.OK:
+        console.print("  [ok]" + wizard.say("auto.worked") + "[/ok]")
+    else:
+        console.print("  [dim]" + wizard.say("auto.notyet") + "[/dim]")
+    console.print()
+    _wait(wizard)
 
 
 def do_battery(wizard):
@@ -329,6 +416,7 @@ ACTIONS = {
     "install": do_install,
     "drive": do_drive,
     "buttons": do_buttons,
+    "autostart": do_autostart,
     "battery": do_battery,
     "help": do_help,
     "language": do_language,

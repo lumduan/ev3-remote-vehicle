@@ -63,6 +63,10 @@ TEXT = {
         "en": "Use the gamepad as the robot's buttons",
         "th": "ใช้จอยเป็นปุ่มของหุ่นยนต์",
     },
+    "menu.autostart": {
+        "en": "Start the buttons by themselves",
+        "th": "ให้ปุ่มทำงานเองอัตโนมัติ",
+    },
     "menu.battery": {
         "en": "How full are the batteries",
         "th": "ดูแบตเตอรี่",
@@ -221,6 +225,77 @@ TEXT = {
         "en": "The controller is not connected, so I cannot see its "
               "battery.",
         "th": "จอยยังไม่ได้เชื่อมต่อ จึงดูแบตเตอรี่ไม่ได้",
+    },
+
+    # -- starting by itself -------------------------------------------
+    "auto.title": {
+        "en": "Start the buttons by themselves",
+        "th": "ให้ปุ่มทำงานเองอัตโนมัติ",
+    },
+    "auto.what": {
+        "en": "The robot can turn the gamepad buttons on by itself "
+              "every time it starts. Then you never have to switch "
+              "them on again.",
+        "th": "หุ่นยนต์เปิดปุ่มจอยให้เองได้ทุกครั้งที่เปิดเครื่อง "
+              "จะได้ไม่ต้องมาเปิดเองอีก",
+    },
+    "auto.on": {
+        "en": "It is on. The buttons will work by themselves after the "
+              "robot starts - just press PS on the gamepad.",
+        "th": "เปิดอยู่แล้ว ปุ่มจะทำงานเองหลังหุ่นยนต์เปิดเครื่อง "
+              "แค่กดปุ่ม PS บนจอย",
+    },
+    "auto.off": {
+        "en": "It is not set up yet. Choose \"Put the programs on the "
+              "robot\" first.",
+        "th": "ยังไม่ได้ตั้งค่า เลือก \"ติดตั้งโปรแกรมลงในหุ่นยนต์\" ก่อน",
+    },
+    "auto.needsroot": {
+        "en": "This last bit needs a grown-up, once. Ask them to type "
+              "this on the computer:",
+        "th": "ขั้นตอนสุดท้ายนี้ต้องให้ผู้ใหญ่ช่วยครั้งเดียว "
+              "ขอให้เขาพิมพ์บรรทัดนี้ในคอมพิวเตอร์",
+    },
+    "auto.password": {
+        "en": "It will ask for a password. The password is: maker",
+        "th": "เครื่องจะถามรหัสผ่าน รหัสคือ maker",
+    },
+    "auto.explain": {
+        "en": "That line tells the robot it may start your programs "
+              "before anybody logs in. It is only needed once, ever.",
+        "th": "บรรทัดนี้บอกหุ่นยนต์ว่าเริ่มโปรแกรมของเราได้ "
+              "ก่อนที่จะมีใครล็อกอิน ทำครั้งเดียวพอ",
+    },
+    "auto.pressdone": {
+        "en": "Press Enter when that is done and I will check.",
+        "th": "ทำเสร็จแล้วกด Enter แล้วจะตรวจให้",
+    },
+    "auto.worked": {
+        "en": "It worked. The buttons will start by themselves from "
+              "now on.",
+        "th": "สำเร็จแล้ว ต่อไปปุ่มจะเริ่มทำงานเองทุกครั้ง",
+    },
+    "auto.notyet": {
+        "en": "Not yet. Nothing is broken - the line just has not been "
+              "run. You can come back and try again any time.",
+        "th": "ยังไม่สำเร็จ ไม่มีอะไรเสียหาย แค่ยังไม่ได้พิมพ์บรรทัดนั้น "
+              "กลับมาลองใหม่เมื่อไหร่ก็ได้",
+    },
+    "check.autostart": {
+        "en": "Starting by itself",
+        "th": "การเริ่มทำงานเอง",
+    },
+    "status.needsroot": {
+        "en": "needs a grown-up",
+        "th": "ต้องให้ผู้ใหญ่ช่วย",
+    },
+    "install.moved": {
+        "en": "I also tidied away an old copy at {0}",
+        "th": "และเก็บกวาดไฟล์เก่าที่ {0} ให้แล้ว",
+    },
+    "install.service": {
+        "en": "The robot is set to start the buttons by itself.",
+        "th": "ตั้งค่าให้หุ่นยนต์เริ่มปุ่มเองแล้ว",
     },
 
     # -- help ---------------------------------------------------------

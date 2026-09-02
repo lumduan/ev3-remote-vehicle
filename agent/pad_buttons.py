@@ -2,15 +2,31 @@
 """BRICK CODE. The gamepad's buttons, as the brick's own buttons.
 
 Runs on the EV3 itself, on CPython 3.5 with the standard library and
-nothing else. Start it once from Brickman's File Browser:
-
-    /home/robot/tanks_1/pad_buttons.py
-
-It detaches immediately, so Brickman comes straight back to its menu,
-and from then on the gamepad drives the brick: the D-pad moves the
+nothing else. The gamepad then drives the brick: the D-pad moves the
 highlight, Cross selects, and Share goes back - which is also what stops
-a running program and, held, reaches the shutdown menu. Starting it a
-second time stops it.
+a running program and, held, reaches the shutdown menu.
+
+Two ways in, and they want opposite things of it:
+
+    /home/robot/pad_buttons/pad_buttons.py
+
+from Brickman's File Browser. It detaches, so the menu comes straight
+back, and starting it a second time stops it.
+
+    pad_buttons.py --foreground
+
+from systemd, which wants the process to stay in the foreground and
+would call the service dead the moment a double fork returned. The unit
+is `agent/pad-buttons.service`, installed into the operator's own
+`~/.config/systemd/user/`.
+
+Autostart at boot needs `Linger=yes` for the robot user, and that is the
+one thing here that needs root: `sudo loginctl enable-linger robot`,
+once, ever. Measured on this brick on 2026-09-02 - there is no cron, no
+/etc/rc.local, /etc/systemd/system is root-only, and the systemd user
+instance does not start until someone logs in. `ev3ctl setup` prints
+that command for the operator to run; nothing in this project runs sudo
+itself.
 
 It works by writing input events into the brick's own button device.
 Writing to an evdev node is not a trick: `evdev_write` in the kernel
@@ -475,8 +491,12 @@ def pump(pad_fd, keys, hats):
 
 def main():
     # type: () -> int
+    # --foreground for systemd, which needs the process to stay put.
+    # Anything else is a File Browser launch, which wants the opposite.
+    foreground = "--foreground" in sys.argv[1:]
+
     existing = running_pid()
-    if existing is not None:
+    if existing is not None and not foreground:
         print("pad_buttons was running as {0}; stopping it".format(
             existing))
         stop_running(existing)
@@ -485,15 +505,26 @@ def main():
         except OSError:
             pass
         return 0
+    if existing is not None:
+        # --foreground takes over rather than toggling. systemd starting
+        # this must never mean "stop the copy that is already running
+        # and exit 0" - that exits cleanly, so Restart=on-failure would
+        # not bring it back, and the service would sit dead.
+        print("taking over from {0}".format(existing))
+        stop_running(existing)
 
     buttons_path = find_buttons()
     print("brick buttons: {0}".format(buttons_path))
     if find_pad() is None:
         print("no gamepad yet - press PS; this will wait for it")
-    print("gamepad buttons -> brick buttons. Start again to stop.")
+    if foreground:
+        print("gamepad buttons -> brick buttons. Ctrl-C to stop.")
+    else:
+        print("gamepad buttons -> brick buttons. Start again to stop.")
     sys.stdout.flush()
 
-    daemonise()
+    if not foreground:
+        daemonise()
 
     with open(PIDFILE, "w") as handle:
         handle.write(str(os.getpid()))

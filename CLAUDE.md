@@ -299,7 +299,15 @@ between them.
 ## Working on the brick
 
 - Do not run `apt`, `pip`, or `sudo` on the brick. Nothing gets
-  installed. The brick has no internet access, and an image that has
+  installed. **The one exception is not an exception to this rule but a
+  consequence of it:** starting `pad_buttons.py` at boot needs
+  `sudo loginctl enable-linger robot`, once. Measured 2026-09-02 - there
+  is no cron, no `/etc/rc.local`, `/etc/systemd/system` is root-only,
+  and the systemd user instance has `Linger=no`, so no root-free route
+  exists. `ev3ctl setup` **prints** that command for the operator to run
+  and then checks whether it worked. Nothing in this project runs it,
+  and a test walks the parse tree of the setup modules to keep it that
+  way. The brick has no internet access, and an image that has
   been modified by hand is an image whose state nobody knows.
 - The development link is USB. `ssh robot@ev3dev.local`, password
   `maker`, or a key installed once with `ssh-copy-id`.

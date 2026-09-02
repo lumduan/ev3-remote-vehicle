@@ -98,6 +98,62 @@ Two consequences worth stating plainly:
 It imports nothing third-party, so the `ev3dev2` exception above does
 not extend to it and does not need to.
 
+### `pad_buttons.py` has two launchers, and a flag to tell them apart
+
+It lives in its own folder, `/home/robot/pad_buttons/`, not beside
+`tank_drive.py` in `tanks_1/`. It is not part of driving, and it is the
+one program here meant to be running all the time rather than started
+for a session.
+
+It double-forks and detaches, which is right when Brickman's File
+Browser launches it - the menu comes straight back - and wrong under
+systemd, which would see the foreground process exit at once and call
+the service dead. So it takes **`--foreground`**. The unit passes it, a
+File Browser launch does not. One flag, two launchers, no heuristics.
+
+With no flag it is a **toggle**: launching it while a copy is running
+stops that copy and exits. With `--foreground` it **takes over**
+instead. The distinction is not cosmetic. If systemd's own start toggled
+the running copy off and exited 0, `Restart=on-failure` would see a
+clean exit, leave the service dead, and the buttons would silently stop
+working.
+
+`Restart=on-failure`, not `always`, for the same reason from the other
+direction: a deliberate stop has to stay stopped, or the toggle reads as
+"it will not turn off".
+
+The pidfile and the log are derived from
+`os.path.dirname(os.path.abspath(__file__))`, so they follow the program
+wherever it is installed and no path constant needs editing.
+
+### Autostart needs one `sudo`, run by a person, once
+
+`agent/pad-buttons.service` is a systemd **user** unit. Installing,
+enabling and editing it are all owned by `robot`, who is already in the
+`input` group and needs no more privilege than that.
+
+The exception is lingering. A user service starts at login, and nothing
+logs in at boot, so it needs:
+
+```bash
+sudo loginctl enable-linger robot
+```
+
+once, ever. Measured on this brick 2026-09-02: there is no cron at all,
+no `/etc/rc.local`, no `/etc/xdg/autostart`, and `/etc/systemd/system`
+is root-only - so there is no root-free route to autostart, and this is
+the one that needs the least root.
+
+**Nothing in this project runs that command.** `ev3ctl setup` prints it
+for the operator and then checks whether it worked. A test walks the
+parse tree of the setup modules asserting no `sudo` string reaches a
+call, so the rule cannot erode by accident.
+
+`After=bluetooth.target` in the unit is ordering only. It is not a
+promise the pad is connected - the program already waits for the pad and
+reconnects, which is what makes the feature work whether the gamepad is
+awake at boot or woken an hour later.
+
 ## Rule 2: the import boundary is one-way and absolute
 
 **No module under `src/` may import anything from this directory, and

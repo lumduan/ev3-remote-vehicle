@@ -160,10 +160,17 @@ def digests():
     return {name: checks.local_digest(name) for name in checks.PROGRAMS}
 
 
-def test_matching_digests_report_ready(monkeypatch):
+def brick_listing(overrides=None):
+    """What `md5sum` on the brick would print, per-program folders."""
     have = digests()
-    out = "\n".join("{0}  {1}/{2}".format(have[n], checks.BRICK_DIR, n)
-                    for n in checks.PROGRAMS)
+    have.update(overrides or {})
+    return "\n".join(
+        "{0}  {1}".format(have[n], checks.brick_path(n))
+        for n in sorted(checks.PROGRAMS))
+
+
+def test_matching_digests_report_ready(monkeypatch):
+    out = brick_listing()
     fake_ssh(monkeypatch, [("md5sum", (True, out))])
     verdict, state, _ = checks.check_programs("robot@x")
     assert (verdict, state) == (checks.OK, "ready")
@@ -176,9 +183,7 @@ def test_a_different_digest_reports_old_not_missing(monkeypatch):
     have, which is a worse afternoon than a file that is not there.
     """
     stale = hashlib.md5(b"an older version").hexdigest()
-    have = digests()
-    out = "{0}  {1}/tank_drive.py\n{2}  {1}/pad_buttons.py".format(
-        stale, checks.BRICK_DIR, have["pad_buttons.py"])
+    out = brick_listing({"tank_drive.py": stale})
     fake_ssh(monkeypatch, [("md5sum", (True, out))])
     verdict, state, detail = checks.check_programs("robot@x")
     assert (verdict, state) == (checks.BAD, "old")
@@ -197,15 +202,12 @@ def test_install_verifies_the_copy_landed(monkeypatch):
 
     By a child. On the floor. So the digests are read back.
     """
-    have = digests()
-    good = "\n".join("{0}  {1}/{2}".format(have[n], checks.BRICK_DIR, n)
-                     for n in checks.PROGRAMS)
-    fake_ssh(monkeypatch, [("md5sum", (True, good))])
-    ok, _ = checks.install("robot@x")
+    fake_ssh(monkeypatch, [("md5sum", (True, brick_listing()))])
+    ok, _, _ = checks.install("robot@x")
     assert ok is True
 
     fake_ssh(monkeypatch, [("md5sum", (True, ""))])
-    ok, detail = checks.install("robot@x")
+    ok, detail, _ = checks.install("robot@x")
     assert ok is False
     assert "missing" in detail
 
@@ -217,10 +219,43 @@ def test_the_programs_it_installs_are_the_ones_that_exist():
         assert checks.local_digest(name) is not None
 
 
-def test_the_install_target_survives_a_reboot():
+def test_the_install_targets_survive_a_reboot():
     """/tmp does not, and the File Browser is where a child looks."""
-    assert checks.BRICK_DIR.startswith("/home/robot")
-    assert not checks.BRICK_DIR.startswith("/tmp")
+    for name, directory in checks.PROGRAMS.items():
+        assert directory.startswith("/home/robot"), name
+        assert not directory.startswith("/tmp"), name
+
+
+def test_the_two_programs_live_in_separate_folders():
+    """One is started for a session; the other runs all the time.
+
+    Keeping pad_buttons out of tanks_1 is what makes that difference
+    visible in the File Browser rather than only in a docstring.
+    """
+    assert checks.PROGRAMS["tank_drive.py"] != \
+        checks.PROGRAMS["pad_buttons.py"]
+    assert checks.PROGRAMS["pad_buttons.py"] == "/home/robot/pad_buttons"
+
+
+def test_install_clears_the_place_pad_buttons_used_to_live():
+    """A leftover copy is not harmless: Brickman lists and runs it."""
+    assert "/home/robot/tanks_1/pad_buttons.py" in checks.OLD_LOCATIONS
+    # ...and never the place it lives now.
+    for name in checks.PROGRAMS:
+        assert checks.brick_path(name) not in checks.OLD_LOCATIONS
+
+
+def test_install_reports_what_it_tidied_away(monkeypatch):
+    def _ssh(host, command, timeout=None, data=None):
+        if "md5sum" in command:
+            return True, brick_listing()
+        if command.startswith("test -f") and "rm -f" in command:
+            return True, "removed"
+        return True, ""
+    monkeypatch.setattr(checks, "_ssh", _ssh)
+    ok, _, notes = checks.install("robot@x")
+    assert ok is True
+    assert "/home/robot/tanks_1/pad_buttons.py" in notes
 
 
 # ---------------------------------------------------------------------
@@ -306,3 +341,108 @@ def test_every_menu_row_renders_in_both_languages(language):
     for item in ITEMS:
         label = wiz.say("menu." + item)
         assert label and label != "menu." + item, (item, language)
+
+
+
+# ---------------------------------------------------------------------
+# Starting by itself
+# ---------------------------------------------------------------------
+
+def autostart_reply(unit="yes", enabled="enabled", linger="yes",
+                    active="active"):
+    return "unit={0}\nenabled={1}\nlinger={2}\nactive={3}".format(
+        unit, enabled, linger, active)
+
+
+@pytest.mark.parametrize("reply,expected", [
+    (autostart_reply(), "on"),
+    (autostart_reply(unit="no", enabled="unknown", linger="no",
+                     active="unknown"), "off"),
+    (autostart_reply(linger="no", enabled="disabled",
+                     active="inactive"), "needs_root"),
+    (autostart_reply(enabled="disabled", active="inactive"), "off"),
+    (autostart_reply(active="inactive"), "off"),
+])
+def test_autostart_states(monkeypatch, reply, expected):
+    fake_ssh(monkeypatch, [("unit=", (True, reply))])
+    assert checks.check_autostart("robot@x")[1] == expected
+
+
+def test_disabled_does_not_read_as_enabled(monkeypatch):
+    """The bug this parser was rewritten to avoid.
+
+    "disabled" contains "enabled" and "inactive" contains "active", so
+    substring matching reported a stopped, disabled service as running.
+    Every probe now labels its own answer and is compared exactly.
+    """
+    fake_ssh(monkeypatch, [
+        ("unit=", (True, autostart_reply(enabled="disabled",
+                                         active="inactive")))])
+    verdict, state, _ = checks.check_autostart("robot@x")
+    assert verdict == checks.BAD
+    assert state == "off"
+
+
+def test_lingering_is_named_separately_because_it_needs_root(monkeypatch):
+    """It is the only step the operator cannot do for themselves."""
+    fake_ssh(monkeypatch, [("unit=", (True, autostart_reply(
+        linger="no")))])
+    verdict, state, detail = checks.check_autostart("robot@x")
+    assert state == "needs_root"
+    assert detail == checks.LINGER_COMMAND
+    assert detail.startswith("sudo ")
+
+
+def test_nothing_in_the_wizard_runs_sudo():
+    """The command is printed for the operator, never executed.
+
+    CLAUDE.md forbids running sudo on the brick. Checked over the parse
+    tree of both modules: the string may appear as a constant, but must
+    never reach a subprocess or an ssh call.
+    """
+    for name in ("setup_checks.py", "cli/setup.py"):
+        path = ROOT / "src" / "ev3ctl" / name
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and \
+                        isinstance(arg.value, str):
+                    assert "sudo " not in arg.value, (name, arg.value)
+
+
+def test_the_unit_file_says_what_it_needs_to():
+    unit = (ROOT / "agent" / "pad-buttons.service").read_text()
+    assert "Type=simple" in unit
+    assert "--foreground" in unit, "systemd needs it not to detach"
+    assert "Restart=on-failure" in unit, "always would fight the toggle"
+    assert "WantedBy=default.target" in unit
+    assert checks.brick_path("pad_buttons.py") in unit
+
+
+def test_the_program_understands_foreground():
+    """The flag the unit passes has to exist in the program."""
+    source = (ROOT / "agent" / "pad_buttons.py").read_text()
+    assert '"--foreground" in sys.argv' in source
+    tree = ast.parse(source)
+    names = {n.name for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef)}
+    assert "daemonise" in names
+
+
+def test_the_menu_has_the_autostart_row():
+    from ev3ctl.cli.setup import ACTIONS, ITEMS
+    assert "autostart" in ITEMS
+    assert "autostart" in ACTIONS
+    for language in messages.LANGUAGES:
+        assert messages.TEXT["menu.autostart"][language]
+
+
+def test_the_autostart_row_shows_needs_a_grown_up():
+    wiz = wizard()
+    wiz.autostart = checks.BAD
+    wiz.autostart_state = "needs_root"
+    label, style = wiz.status_of("autostart")
+    assert style == "warn"
+    assert label == messages.t("status.needsroot", "en")
