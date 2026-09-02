@@ -154,6 +154,28 @@ promise the pad is connected - the program already waits for the pad and
 reconnects, which is what makes the feature work whether the gamepad is
 awake at boot or woken an hour later.
 
+Two things to know when it misbehaves, both verified on a real boot on
+2026-09-02:
+
+**Look in the journal, not the log file.** Under the service the program
+runs with `--foreground`, so it never calls `daemonise()` and never
+redirects its streams - systemd captures them instead:
+
+```bash
+systemctl --user status pad-buttons.service
+journalctl --user -u pad-buttons.service -n 50
+```
+
+`pad_buttons.log` beside the program is still the right place to look
+for a File Browser launch, and only that. Reading it after a reboot
+shows entries from before the reboot, which is misleading if you have
+forgotten why.
+
+**Give it half a minute.** systemd started the unit at 06:41:14 and the
+program's first line landed at 06:41:42 - 28 seconds of Python
+interpreter startup on a 300 MHz ARM9. Pressing PS before then looks
+exactly like a failure and is not.
+
 ## Rule 2: the import boundary is one-way and absolute
 
 **No module under `src/` may import anything from this directory, and

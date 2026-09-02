@@ -234,6 +234,10 @@ anybody signs in. Nothing else about it ever needs a grown-up again.
 When it is done, press Enter and the menu will check and tell you
 whether it worked.
 
+After that, every time you turn the robot on, wait about half a
+minute and then press PS. The buttons will already be working.
+Half a minute is normal - the robot is slow to wake up.
+
 ---
 
 ## 10. When something goes wrong
