@@ -7,6 +7,14 @@ Debian Linux, so the motors and sensors are Linux devices and the
 gamepad is a Linux input device. Nothing about this project is
 proprietary firmware.
 
+> **New here, or setting this up for a child?**
+> Read **[docs/START-HERE.md](docs/START-HERE.md)** instead. It is the
+> same robot explained without jargon, in the order you actually do
+> things. Thai: **[docs/START-HERE.th.md](docs/START-HERE.th.md)**.
+>
+> This file is the engineering record. It assumes you already know what
+> a terminal is.
+
 ## Status
 
 **Phase 3 of 5.** The vehicle does not exist. There is no control loop
@@ -78,7 +86,7 @@ a parts list for a specific build.
 | Item | Count | Notes |
 | --- | --- | --- |
 | LEGO MINDSTORMS EV3 Brick | 1 | the computer; four input ports 1–4, four output ports A–D |
-| microSD card with ev3dev-stretch | 1 | the brick boots from this; the stock LEGO firmware is untouched on internal flash |
+| microSD card with an ev3dev image | 1 | the brick boots from this; the stock LEGO firmware is untouched on internal flash. **This brick's card reads `ev3-micropython-v2.0.0-sd-card-image`** (`/etc/ev3dev-release`, ROADMAP.md), not plain ev3dev-stretch; every Verified fact was read off that card |
 | mini-USB cable | 1 | the development link, into the brick's PC port |
 | EV3 Large Motor | as available | drive |
 | EV3 Medium Motor | as available | steering or auxiliary |
@@ -376,6 +384,9 @@ Bluetooth was never the development link here.
 | `src/ev3ctl/cli/` | CPython 3.12, macOS | One module per subcommand. |
 | `src/ev3ctl/mixer.py` | CPython 3.12, macOS | Held keys to two motor duties. Pure functions, no I/O. |
 | `src/ev3ctl/link.py` | CPython 3.12, macOS | The SSH transport and the only module that knows the wire. |
+| `src/ev3ctl/cli/setup.py` | CPython 3.12, macOS | The beginner's menu. The one subcommand that does not need the brick to answer before it starts. |
+| `src/ev3ctl/setup_checks.py` | CPython 3.12, macOS | What setup checks and how it installs. No drawing, so it is testable without a brick. |
+| `src/ev3ctl/messages.py` | CPython 3.12, macOS | Every word the setup menu says, English and Thai side by side. |
 | `src/ev3ctl/gamepad.py` | CPython 3.12, macOS | The gamepad wizard's arithmetic: advance gates, rest statistics, the mapping document. Pure functions, no I/O. |
 | `src/ev3ctl/evdev_codes.py` | CPython 3.12, macOS | evdev type and code names, transcribed from the v4.14 kernel header. Names only, never a controller layout. |
 | `agent/` | CPython 3.5, ev3dev | Code that runs **on the brick**. Standard library only. Copied there, never imported by `src/`. |
@@ -384,6 +395,8 @@ Bluetooth was never the development link here.
 | `agent/tank_drive.py` | CPython 3.5, ev3dev | Standalone tank drive from the gamepad's left stick. Copied by hand to `/home/robot/tanks_1/`, launched from Brickman. |
 | `agent/pad_buttons.py` | CPython 3.5, ev3dev | Standalone. Maps the gamepad's D-pad, Cross and Share onto the brick's own buttons by injecting input events. Detaches on start; start again to stop. |
 | `tests/` | CPython 3.12, macOS | Tests for the pure host logic, and for the brick's parser read as text. |
+| `docs/START-HERE.md` | — | The beginner's guide. Start here if you have not used an EV3. |
+| `docs/START-HERE.th.md` | — | The same guide in Thai. |
 | `docs/gamepad-mapping.json` | — | Written by `ev3ctl gamepad`. Absent until the wizard has been run. |
 | `pyproject.toml` | — | `uv` project definition. Host dependencies only. |
 | `README.md` | — | This file. |

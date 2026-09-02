@@ -279,7 +279,13 @@ between them.
 ## Conventions
 
 - **English only**, in code, comments, docstrings, documents and commit
-  messages.
+  messages - **with one named exception**: the beginner guide
+  `docs/START-HERE.th.md`, and the `th` half of
+  `src/ev3ctl/messages.py`, are Thai, because the children this project
+  is for read Thai. English stays first: `docs/START-HERE.md` is the
+  source of truth, `en` is the fallback for every wizard string, and a
+  test asserts both language tables carry the same keys. Nothing else
+  is translated - no code, no comment, no commit message.
 - **Line length 79**, both runtimes. `uv run ruff check .` is the gate.
 - **Module docstrings say why the module exists**, not what its name
   already says. Start each one with `HOST CODE.` or `BRICK CODE.` so the

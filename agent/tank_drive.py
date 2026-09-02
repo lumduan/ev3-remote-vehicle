@@ -10,8 +10,12 @@ Bluetooth radio on the pad.
     ssh robot@ev3dev.local python3 -u ~/tank_drive.py
 
 or, with no computer present at all, from Brickman's File
-Browser: /home/robot/tank_drive.py. Brickman's Back button
-sends SIGTERM, which stops both motors on the way out.
+Browser: /home/robot/tanks_1/tank_drive.py. Brickman's Back
+button sends SIGTERM, which stops both motors on the way out.
+
+`ev3ctl setup` puts it there. Before that command existed the copy
+was done by hand, and this docstring said /home/robot/, which was
+where it first went and not where it lives.
 
 Deliberately imports nothing from ev3_agent.py, exactly as
 battery_report.py does, so that it still works when the agent is not

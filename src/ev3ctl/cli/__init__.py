@@ -83,6 +83,20 @@ def build_parser():
     )
     _add_drive(subparsers, common)
     _add_gamepad(subparsers, common)
+    subparsers.add_parser(
+        "setup", parents=[common],
+        help="menu-driven first-time setup, for beginners",
+        description=(
+            "A menu for somebody's first robot. It checks what is "
+            "wrong and says so in plain words, puts the two brick "
+            "programs on the robot, and starts them. Unlike every "
+            "other command here it does not need the brick to be "
+            "reachable before it will start, because finding out why "
+            "it is not reachable is most of what it is for. English "
+            "and Thai."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     return parser
 
 
@@ -189,12 +203,14 @@ def main(argv=None):
     from . import gamepad as gamepad_command
     from . import live as live_command
     from . import scan as scan_command
+    from . import setup as setup_command
 
     runners = {
         "scan": scan_command.run,
         "live": live_command.run,
         "drive": drive_command.run,
         "gamepad": gamepad_command.run,
+        "setup": setup_command.run,
     }
     runner = runners[command]
 
