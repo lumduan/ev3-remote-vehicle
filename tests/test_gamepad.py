@@ -35,21 +35,30 @@ def agent():
     return namespace
 
 
-# Verbatim from this brick on 2026-09-01, with the controller connected
-# over Bluetooth. Not a hypothetical: these are the exact three blocks
-# hid-sony produces for one DualShock 4, with the real capability masks.
-# The EV3's own buttons are prepended as they appear in the same file.
-# The S: Sysfs lines are omitted: nothing here reads them and the real
-# ones run past the line limit.
+# Verbatim from this brick, with the controller connected over
+# Bluetooth: the three blocks hid-sony produces for one DualShock 4,
+# read 2026-09-01, and the EV3's own buttons, read 2026-09-02.
+#
+# The buttons block was invented when this fixture was first written,
+# and was wrong in four ways - event0 for event1, a Phys of
+# /dev/input/event0, an EV mask of 100003, and a KEY mask ending
+# 10000000 rather than 10004000. That last dropped bit 14,
+# KEY_BACKSPACE, which is the Back button, so the brick appeared to have
+# five buttons instead of six. It is captured now, and decoded by a test
+# below.
+#
+# The controllers' S: Sysfs lines are omitted: nothing reads them and
+# the real ones run past the line limit.
 THREE_DEVICES = '''\
 I: Bus=0019 Vendor=0001 Product=0001 Version=0100
 N: Name="EV3 Brick Buttons"
-P: Phys=/dev/input/event0
-S: Sysfs=/devices/platform/gpio_keys/input/input0
+P: Phys=gpio-keys/input0
+S: Sysfs=/devices/platform/gpio_keys/input/input1
 U: Uniq=
-H: Handlers=kbd event0
-B: EV=100003
-B: KEY=1680 0 0 10000000
+H: Handlers=kbd event1
+B: PROP=0
+B: EV=3
+B: KEY=1680 0 0 10004000
 
 I: Bus=0005 Vendor=054c Product=09cc Version=8100
 N: Name="Wireless Controller Touchpad"
@@ -1384,3 +1393,42 @@ def test_every_identity_source_the_agent_can_return_is_rendered():
         assert "not reported" not in markup, source
         assert "v" in markup
     assert "not reported" in ui._identity_markup({})
+
+
+# ---------------------------------------------------------------------
+# The brick's own buttons
+# ---------------------------------------------------------------------
+
+def test_the_brick_declares_six_buttons_including_back(agent):
+    """Read off the brick 2026-09-02: `B: KEY=1680 0 0 10004000`.
+
+    The fixture originally carried this mask ending 10000000, invented
+    rather than captured, which dropped bit 14 - KEY_BACKSPACE, the Back
+    button. A feature that maps a gamepad button onto Back would have
+    been designed against a brick that appeared not to have one.
+    """
+    blocks = agent["parse_input_devices"](THREE_DEVICES)
+    buttons = [b for b in blocks if b["name"] == "EV3 Brick Buttons"][0]
+    assert buttons["key_mask"] == "1680 0 0 10004000"
+
+    has = agent["mask_has_bit"]
+    for code, name in ((14, "KEY_BACKSPACE"), (28, "KEY_ENTER"),
+                       (103, "KEY_UP"), (105, "KEY_LEFT"),
+                       (106, "KEY_RIGHT"), (108, "KEY_DOWN")):
+        assert has(buttons["key_mask"], code) is True, name
+    # And nothing else: six buttons, not five and not seven.
+    declared = [c for c in range(256)
+                if has(buttons["key_mask"], c)]
+    assert declared == [14, 28, 103, 105, 106, 108]
+
+
+def test_the_brick_buttons_are_found_by_name_not_node(agent):
+    """`event1` here, `event0` in the invented fixture. Neither is stable.
+
+    The node number is whatever order the kernel bound things in. The
+    name is the identifier, exactly as for the gamepad.
+    """
+    blocks = agent["parse_input_devices"](THREE_DEVICES)
+    buttons = [b for b in blocks if b["name"] == "EV3 Brick Buttons"][0]
+    assert buttons["event"] == "event1"
+    assert buttons["uniq"] is None, "no Uniq, so Name is the identifier"

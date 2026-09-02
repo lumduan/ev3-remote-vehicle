@@ -381,6 +381,8 @@ Bluetooth was never the development link here.
 | `agent/` | CPython 3.5, ev3dev | Code that runs **on the brick**. Standard library only. Copied there, never imported by `src/`. |
 | `agent/ev3_agent.py` | CPython 3.5, ev3dev | All hardware access, and the watchdog. One file, no dependencies. |
 | `agent/battery_report.py` | CPython 3.5, ev3dev | Standalone battery diagnostic. Copied by hand, not part of the protocol. |
+| `agent/tank_drive.py` | CPython 3.5, ev3dev | Standalone tank drive from the gamepad's left stick. Copied by hand to `/home/robot/tanks_1/`, launched from Brickman. |
+| `agent/pad_buttons.py` | CPython 3.5, ev3dev | Standalone. Maps the gamepad's D-pad, Cross and Share onto the brick's own buttons by injecting input events. Detaches on start; start again to stop. |
 | `tests/` | CPython 3.12, macOS | Tests for the pure host logic, and for the brick's parser read as text. |
 | `docs/gamepad-mapping.json` | — | Written by `ev3ctl gamepad`. Absent until the wizard has been run. |
 | `pyproject.toml` | — | `uv` project definition. Host dependencies only. |

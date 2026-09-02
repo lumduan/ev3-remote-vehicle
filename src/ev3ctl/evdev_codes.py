@@ -78,6 +78,26 @@ ABS_NAMES = {
 
 HAT_CODES = (ABS_HAT0X, ABS_HAT0Y, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17)
 
+# The EV3's own buttons, decoded from its `B: KEY=1680 0 0 10004000` on
+# 2026-09-02. Not gamepad codes: these are ordinary keyboard codes, and
+# the brick's button device is bound to the `kbd` handler. Here so that
+# host tooling can name what a brick button press was.
+KEY_BACKSPACE = 14
+KEY_ENTER = 28
+KEY_UP = 103
+KEY_LEFT = 105
+KEY_RIGHT = 106
+KEY_DOWN = 108
+
+BRICK_BUTTONS = {
+    KEY_BACKSPACE: "Back",
+    KEY_ENTER: "Centre",
+    KEY_UP: "Up",
+    KEY_LEFT: "Left",
+    KEY_RIGHT: "Right",
+    KEY_DOWN: "Down",
+}
+
 # Buttons. The header gives 0x130-0x134 two names each: BTN_SOUTH and
 # BTN_A are the same number, as are BTN_EAST/BTN_B, BTN_NORTH/BTN_X and
 # BTN_WEST/BTN_Y. The letter aliases follow the *Xbox* face layout, so on
@@ -89,6 +109,12 @@ HAT_CODES = (ABS_HAT0X, ABS_HAT0Y, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17)
 # This is precisely why the wizard records the label the operator was
 # asked to press as a separate field from the symbolic name.
 KEY_NAMES = {
+    KEY_BACKSPACE: "KEY_BACKSPACE",
+    KEY_ENTER: "KEY_ENTER",
+    KEY_UP: "KEY_UP",
+    KEY_LEFT: "KEY_LEFT",
+    KEY_RIGHT: "KEY_RIGHT",
+    KEY_DOWN: "KEY_DOWN",
     0x130: "BTN_SOUTH",
     0x131: "BTN_EAST",
     0x132: "BTN_C",

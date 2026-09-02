@@ -71,6 +71,33 @@ def read_attr(path, name):
     ...
 ```
 
+### `pad_buttons.py` writes to an input device
+
+Every other program here reads hardware. `agent/pad_buttons.py` writes
+to one: it injects key events into the brick's own button device, so the
+gamepad's D-pad, Cross and Share act as the brick's arrows, centre and
+Back.
+
+That is not a trick. `evdev_write` in the kernel calls
+`input_inject_event`, so an event written to an event node arrives
+exactly as if the button had been pressed. Verified on this brick on
+2026-09-02: the events read back out of the device, and Brickman redrew
+its menu in response.
+
+Two consequences worth stating plainly:
+
+- **An injected key stays pressed until something releases it.** That is
+  the same shape of hazard as a latched motor, and it takes the same
+  answer: every path out of the program releases every key it holds. The
+  one that matters is Back, which walks the brick into shutdown on its
+  own.
+- **An injected Back is a SIGTERM to whatever Brickman launched**, since
+  that is what Brickman's own Back button does. That is the point of it,
+  and it is also why it can stop `tank_drive.py` mid-drive.
+
+It imports nothing third-party, so the `ev3dev2` exception above does
+not extend to it and does not need to.
+
 ## Rule 2: the import boundary is one-way and absolute
 
 **No module under `src/` may import anything from this directory, and
