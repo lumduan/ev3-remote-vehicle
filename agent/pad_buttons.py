@@ -587,6 +587,14 @@ def main():
                 try:
                     pad_fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
                 except OSError as exc:
+                    # Keep retrying, and never bound this. EACCES here
+                    # is normal and transient: udev creates the node,
+                    # then applies the rule that puts it in the input
+                    # group, and we can arrive in between. Observed on
+                    # a real boot 2026-09-02 - two Permission denied
+                    # two seconds apart, then success on the third
+                    # look. A retry limit would turn a 4 second wait
+                    # into "the pad does not work today".
                     sys.stderr.write("cannot open {0}: {1}\n".format(
                         node, exc))
                     sys.stderr.flush()
