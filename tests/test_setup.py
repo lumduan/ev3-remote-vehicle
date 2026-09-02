@@ -446,3 +446,79 @@ def test_the_autostart_row_shows_needs_a_grown_up():
     label, style = wiz.status_of("autostart")
     assert style == "warn"
     assert label == messages.t("status.needsroot", "en")
+
+
+def _pad_buttons_module():
+    """Import the agent program on the host.
+
+    Safe because its module scope is imports and constants only - it
+    touches no hardware until main() runs. That is not true of every
+    program in agent/, so this helper exists rather than a shared one.
+    """
+    import importlib.util
+    path = ROOT / "agent" / "pad_buttons.py"
+    spec = importlib.util.spec_from_file_location("pad_buttons", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_proc(tmp_path, pid, cmdline):
+    """Write one /proc/<pid>/cmdline, NUL-separated as the kernel does."""
+    entry = tmp_path / str(pid)
+    entry.mkdir()
+    (entry / "cmdline").write_bytes(b"\x00".join(cmdline) + b"\x00")
+
+
+def test_a_reused_pid_is_not_mistaken_for_a_running_copy(
+        tmp_path, monkeypatch):
+    """The reboot case, and the one that would do harm.
+
+    The pidfile outlives a reboot and pids are reused, so a stale one
+    can name a live process that is not us. Signalling that at boot
+    would mean SIGTERM to a system daemon.
+    """
+    module = _pad_buttons_module()
+    _fake_proc(tmp_path, 4242, [b"/lib/systemd/systemd-udevd"])
+    monkeypatch.setattr(module, "PROC", str(tmp_path))
+    monkeypatch.setattr(module, "PIDFILE", str(tmp_path / "pid"))
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: None)
+    (tmp_path / "pid").write_text("4242")
+
+    assert module.running_pid() is None
+
+
+def test_a_real_running_copy_is_still_found(tmp_path, monkeypatch):
+    """The check must not be so strict that the toggle stops working."""
+    module = _pad_buttons_module()
+    _fake_proc(tmp_path, 4242, [
+        b"/usr/bin/python3",
+        b"/home/robot/pad_buttons/pad_buttons.py",
+        b"--foreground",
+    ])
+    monkeypatch.setattr(module, "PROC", str(tmp_path))
+    monkeypatch.setattr(module, "PIDFILE", str(tmp_path / "pid"))
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: None)
+    (tmp_path / "pid").write_text("4242")
+
+    assert module.running_pid() == 4242
+
+
+def test_a_dead_pid_is_not_a_running_copy(tmp_path, monkeypatch):
+    module = _pad_buttons_module()
+
+    def dead(pid, sig):
+        raise OSError(3, "No such process")
+
+    monkeypatch.setattr(module, "PROC", str(tmp_path))
+    monkeypatch.setattr(module, "PIDFILE", str(tmp_path / "pid"))
+    monkeypatch.setattr(module.os, "kill", dead)
+    (tmp_path / "pid").write_text("4242")
+
+    assert module.running_pid() is None
+
+
+def test_no_pidfile_is_not_a_running_copy(tmp_path, monkeypatch):
+    module = _pad_buttons_module()
+    monkeypatch.setattr(module, "PIDFILE", str(tmp_path / "absent"))
+    assert module.running_pid() is None

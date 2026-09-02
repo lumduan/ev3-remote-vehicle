@@ -133,6 +133,10 @@ INPUT_DIR = "/dev/input"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PIDFILE = os.path.join(HERE, "pad_buttons.pid")
+PROGRAM = os.path.basename(os.path.abspath(__file__))
+# A seam, so the identity check below can be tested on a host
+# that has no /proc. Never reassigned on the brick.
+PROC = "/proc"
 LOGFILE = os.path.join(HERE, "pad_buttons.log")
 
 # struct input_event: struct timeval (two 32-bit longs on this kernel),
@@ -382,9 +386,30 @@ class Keys(object):
 # Running in the background
 # ---------------------------------------------------------------------
 
+def _is_this_program(pid):
+    # type: (int) -> bool
+    """Whether /proc says that pid is running this program."""
+    try:
+        path = os.path.join(PROC, str(pid), "cmdline")
+        with open(path, "rb") as handle:
+            cmdline = handle.read()
+    except Exception:
+        # No readable /proc entry means we cannot identify it. Refusing
+        # to signal a process we cannot name is the safe direction.
+        return False
+    return PROGRAM.encode() in cmdline
+
+
 def running_pid():
     # type: () -> int or None
-    """The pid in the pidfile, if that process is still alive."""
+    """The pid in the pidfile, if it is alive and is this program.
+
+    Liveness alone is not enough. The pidfile outlives a reboot and pids
+    are reused, so a stale one can name an unrelated process that
+    happened to be given the same number. Signalling that would be a
+    real fault rather than a cosmetic one: at boot the numbers within
+    reach belong to system daemons, and the service starts at boot.
+    """
     try:
         with open(PIDFILE) as handle:
             pid = int(handle.read().strip())
@@ -393,6 +418,8 @@ def running_pid():
     try:
         os.kill(pid, 0)
     except OSError:
+        return None
+    if not _is_this_program(pid):
         return None
     return pid
 
